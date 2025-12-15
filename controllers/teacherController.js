@@ -1,5 +1,6 @@
 const Teacher = require("../models/Teacher");
 const User = require("../models/User");
+const bcrypt = require("bcryptjs");
 
 // 🧾 1️⃣ Teacher self-register
 exports.registerTeacher = async (req, res) => {
@@ -10,11 +11,14 @@ exports.registerTeacher = async (req, res) => {
     if (existingUser)
       return res.status(400).json({ message: "Email already registered" });
 
+    // Encrypt password
+    const hash = await bcrypt.hash(password, 10);
+
     // Create a teacher user
     const user = await User.create({
       name,
       email,
-      password,
+      password: hash,
       role: "teacher",
       schoolId,
     });

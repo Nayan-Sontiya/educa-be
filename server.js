@@ -21,6 +21,9 @@ app.use("/api/auth", require("./routes/authRoutes"));
 app.use("/api/schools", require("./routes/schoolRoutes"));
 app.use("/api/users", require("./routes/userRoutes"));
 app.use("/api/teachers", require("./routes/teacherRoutes"));
+app.use("/api/classes", require("./routes/classRoutes"));
+app.use("/api/sections", require("./routes/sectionRoutes"));
+app.use("/api/subjects", require("./routes/subjectRoutes"));
 
 app.get("/", (req, res) => res.send("EduVerse API is running 🚀"));
 

@@ -3,6 +3,7 @@ const School = require("../models/School");
 const User = require("../models/User");
 const bcrypt = require("bcryptjs");
 const udiseService = require("../utils/udiseService");
+const { createDefaultClasses } = require("../utils/createDefaultClasses");
 
 // Register school (public). Expects multipart/form-data for file uploads.
 exports.registerSchool = async (req, res) => {
@@ -117,6 +118,7 @@ exports.registerSchool = async (req, res) => {
 
     // link user -> school
     user.schoolId = school._id;
+    await createDefaultClasses(school._id);
     await user.save();
 
     res.status(201).json({ message: "School registered successfully", school });
