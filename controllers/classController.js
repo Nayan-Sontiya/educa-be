@@ -1,28 +1,60 @@
+const { default: mongoose } = require("mongoose");
 const Class = require("../models/Class");
 
 exports.getClasses = async (req, res) => {
   try {
-    const classes = await Class.find({ schoolId: req.user.schoolId }).sort({
-      name: 1,
-    });
-    console.log(classes);
+    const classes = await Class.aggregate([
+      {
+        $match: {
+          schoolId: new mongoose.Types.ObjectId(req.user.schoolId),
+        },
+      },
+      {
+        $lookup: {
+          from: "sections",
+          localField: "sectionId",
+          foreignField: "_id",
+          as: "section",
+        },
+      },
+      {
+        $unwind: {
+          path: "$section",
+          preserveNullAndEmptyArrays: true,
+        },
+      },
+      {
+        $project: {
+          name: 1,
+          status: 1,
+          section: {
+            _id: 1,
+            name: 1,
+          },
+        },
+      },
+      {
+        $sort: { updatedAt: 1 },
+      },
+    ]);
+
     res.json({
       data: classes,
       total: classes.length,
     });
   } catch (error) {
-    console.log("Error fetching classes:", error.message);
     res.status(500).json({ data: [], total: 0 });
   }
 };
 
 exports.addClass = async (req, res) => {
   try {
-    const { name } = req.body;
+    const { name, sectionId } = req.body;
 
     const newClass = await Class.create({
       schoolId: req.user.schoolId,
       name,
+      sectionId,
     });
 
     res.status(201).json({
@@ -38,7 +70,7 @@ exports.addClass = async (req, res) => {
       });
     }
 
-    res.status(500).json({ data: [], total: 0 });
+    res.status(500).json({ data: [], total: 0, error });
   }
 };
 
@@ -63,14 +95,14 @@ exports.deleteClass = async (req, res) => {
   try {
     const { classId } = req.params;
 
-    const studentCount = await Student.countDocuments({ classId });
-    if (studentCount > 0) {
-      return res.status(400).json({
-        message: "Students exist in this class. Deactivate instead.",
-        data: [],
-        total: 0,
-      });
-    }
+    // const studentCount = await Student.countDocuments({ classId });
+    // if (studentCount > 0) {
+    //   return res.status(400).json({
+    //     message: "Students exist in this class. Deactivate instead.",
+    //     data: [],
+    //     total: 0,
+    //   });
+    // }
 
     await Class.findByIdAndDelete(classId);
 

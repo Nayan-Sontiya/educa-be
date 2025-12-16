@@ -212,7 +212,6 @@ exports.getMyProfile = async (req, res) => {
 
 exports.updateMyProfile = async (req, res) => {
   try {
-    console.log(req.user, "Update profile data:", req.body);
     const teacher = await Teacher.findOneAndUpdate(
       { userId: req.user.id },
       req.body,

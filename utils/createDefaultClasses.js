@@ -34,7 +34,6 @@ exports.createDefaultClasses = async (schoolId) => {
     created.forEach((cls) => {
       createDefaultSubjects(cls._id, cls.schoolId);
     });
-    console.log("Default classes created for school:", schoolId);
   } catch (error) {
     console.error("Error creating default classes:", error);
   }

@@ -2,13 +2,11 @@ const Section = require("../models/Section");
 
 exports.addSection = async (req, res) => {
   try {
-    const { classId, name, capacity } = req.body;
-
+    const { name } = req.body;
+    const { schoolId } = req.user;
     const section = await Section.create({
-      schoolId: req.user.schoolId,
-      classId,
+      schoolId,
       name,
-      capacity,
     });
 
     res.status(201).json({ data: section, total: 1 });
@@ -64,6 +62,24 @@ exports.getSectionsByClass = async (req, res) => {
     res.status(200).json({
       data: formatted,
       total: formatted.length,
+    });
+  } catch (error) {
+    console.error("Error fetching sections:", error.message);
+    res.status(500).json({
+      data: [],
+      total: 0,
+    });
+  }
+};
+
+exports.getSections = async (req, res) => {
+  try {
+    const { schoolId } = req.user;
+    const sections = await Section.find({ schoolId }).sort({ name: 1 });
+
+    res.status(200).json({
+      data: sections,
+      total: sections.length,
     });
   } catch (error) {
     console.error("Error fetching sections:", error.message);
