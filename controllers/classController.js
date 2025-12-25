@@ -3,46 +3,38 @@ const Class = require("../models/Class");
 
 exports.getClasses = async (req, res) => {
   try {
+    const schoolId = new mongoose.Types.ObjectId(req.user.schoolId);
+
     const classes = await Class.aggregate([
-      {
-        $match: {
-          schoolId: new mongoose.Types.ObjectId(req.user.schoolId),
-        },
-      },
+      { $match: { schoolId } },
+      { $sort: { order: 1 } },
       {
         $lookup: {
-          from: "sections",
-          localField: "sectionId",
-          foreignField: "_id",
-          as: "section",
-        },
-      },
-      {
-        $unwind: {
-          path: "$section",
-          preserveNullAndEmptyArrays: true,
+          from: "classsections",
+          localField: "_id",
+          foreignField: "classId",
+          as: "sections",
         },
       },
       {
         $project: {
           name: 1,
+          order: 1,
           status: 1,
-          section: {
-            _id: 1,
-            name: 1,
+          sections: {
+            $filter: {
+              input: "$sections",
+              as: "s",
+              cond: { $eq: ["$$s.isDefault", false] }, // 👈 hides Default
+            },
           },
         },
       },
-      {
-        $sort: { updatedAt: 1 },
-      },
     ]);
 
-    res.json({
-      data: classes,
-      total: classes.length,
-    });
+    res.json({ data: classes, total: classes.length });
   } catch (error) {
+    console.error("getClasses error:", error);
     res.status(500).json({ data: [], total: 0 });
   }
 };

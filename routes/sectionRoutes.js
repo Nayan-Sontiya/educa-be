@@ -9,6 +9,7 @@ const auth = () => roleCheck(["admin", "school_admin"]);
 router.get("/:classId", protect, auth(), sectionCtrl.getSectionsByClass);
 router.get("/", protect, auth(), sectionCtrl.getSections);
 router.post("/", protect, auth(), sectionCtrl.addSection);
+router.put("/:sectionId", protect, auth(), sectionCtrl.updateSection);
 router.delete("/:sectionId", protect, auth(), sectionCtrl.deleteSection);
 
 module.exports = router;

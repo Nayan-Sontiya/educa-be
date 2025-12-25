@@ -22,19 +22,75 @@ exports.addSection = async (req, res) => {
   }
 };
 
-exports.deleteSection = async (req, res) => {
+exports.updateSection = async (req, res) => {
   try {
-    const { sectionId } = req.params;
+    const { sectionId } = req.params; // sectionId
+    const { name } = req.body;
+    const { schoolId } = req.user;
 
-    const studentCount = await Student.countDocuments({ sectionId });
-
-    if (studentCount > 0) {
+    if (!name) {
       return res.status(400).json({
-        message: "Students present. Reassign/Delete them first.",
+        message: "Name is required",
         data: [],
         total: 0,
       });
     }
+
+    // Check duplicate in same school
+    const existing = await Section.findOne({
+      schoolId,
+      name,
+      _id: { $ne: sectionId }, // exclude current id
+    });
+
+    if (existing) {
+      return res.status(400).json({
+        message: "Section already exists",
+        data: [],
+        total: 0,
+      });
+    }
+
+    const updated = await Section.findOneAndUpdate(
+      { _id: sectionId, schoolId },
+      { name },
+      { new: true } // return updated doc
+    );
+
+    if (!updated) {
+      return res.status(404).json({
+        message: "Section not found",
+        data: [],
+        total: 0,
+      });
+    }
+
+    res.json({
+      data: updated,
+      total: 1,
+    });
+  } catch (error) {
+    res.status(500).json({
+      message: "Server error",
+      data: [],
+      total: 0,
+    });
+  }
+};
+
+exports.deleteSection = async (req, res) => {
+  try {
+    const { sectionId } = req.params;
+
+    // const studentCount = await Student.countDocuments({ sectionId });
+
+    // if (studentCount > 0) {
+    //   return res.status(400).json({
+    //     message: "Students present. Reassign/Delete them first.",
+    //     data: [],
+    //     total: 0,
+    //   });
+    // }
 
     await Section.findByIdAndDelete(sectionId);
 

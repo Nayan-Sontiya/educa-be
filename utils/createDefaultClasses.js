@@ -1,4 +1,5 @@
 const Class = require("../models/Class");
+const ClassSection = require("../models/ClassSection");
 
 const DEFAULT_CLASSES = [
   "Nursery",
@@ -20,21 +21,28 @@ const DEFAULT_CLASSES = [
 
 exports.createDefaultClasses = async (schoolId) => {
   try {
-    // Check if classes already exist for this school
-    const count = await Class.countDocuments({ schoolId });
-    if (count > 0) return; // Already created
+    // ✅ Prevent duplicate execution
+    const existingCount = await Class.countDocuments({ schoolId });
+    if (existingCount > 0) return;
 
-    const bulk = DEFAULT_CLASSES.map((name) => ({
+    const bulkClasses = DEFAULT_CLASSES.map((name, index) => ({
       schoolId,
       name,
+      order: index + 1, // 🔑 FIXED SEQUENCE
       status: "active",
     }));
 
-    const created = await Class.insertMany(bulk);
-    created.forEach((cls) => {
-      createDefaultSubjects(cls._id, cls.schoolId);
-    });
+    const createdClasses = await Class.insertMany(bulkClasses);
+    for (const cls of createdClasses) {
+      await ClassSection.create({
+        schoolId,
+        classId: cls._id,
+        name: "Default",
+        isDefault: true,
+      });
+    }
   } catch (error) {
-    console.error("Error creating default classes:", error);
+    console.error("❌ Error creating default classes:", error);
+    throw error;
   }
 };
