@@ -1,38 +1,70 @@
 const { default: mongoose } = require("mongoose");
+const ClassSection = require("../models/ClassSection");
 const Class = require("../models/Class");
 
 exports.getClasses = async (req, res) => {
   try {
     const schoolId = new mongoose.Types.ObjectId(req.user.schoolId);
 
-    const classes = await Class.aggregate([
+    const data = await ClassSection.aggregate([
       { $match: { schoolId } },
-      { $sort: { order: 1 } },
+
+      // Join Class
       {
         $lookup: {
-          from: "classsections",
-          localField: "_id",
-          foreignField: "classId",
-          as: "sections",
+          from: "classes",
+          localField: "classId",
+          foreignField: "_id",
+          as: "class",
         },
       },
       {
+        $unwind: {
+          path: "$class",
+          preserveNullAndEmptyArrays: true, // ✅ keep orphan rows
+        },
+      },
+
+      // Join Section
+      {
+        $lookup: {
+          from: "sections",
+          localField: "sectionId",
+          foreignField: "_id",
+          as: "section",
+        },
+      },
+      {
+        $unwind: {
+          path: "$section",
+          preserveNullAndEmptyArrays: true, // ✅ keep rows with no section
+        },
+      },
+
+      // Shape response
+      {
         $project: {
-          name: 1,
-          order: 1,
+          _id: 1,
+          sectionId: 1,
+          sectionName: "$section.name",
+          classId: "$class._id",
+          className: "$class.name",
+          classOrder: "$class.order",
           status: 1,
-          sections: {
-            $filter: {
-              input: "$sections",
-              as: "s",
-              cond: { $eq: ["$$s.isDefault", false] }, // 👈 hides Default
-            },
-          },
+          isDefault: 1,
+        },
+      },
+
+      // Sort with null-safe order
+      {
+        $sort: {
+          classOrder: 1,
+          sectionName: 1,
         },
       },
     ]);
 
-    res.json({ data: classes, total: classes.length });
+    res.json({ data, total: data.length });
   } catch (error) {
     console.error("getClasses error:", error);
     res.status(500).json({ data: [], total: 0 });
@@ -87,16 +119,7 @@ exports.deleteClass = async (req, res) => {
   try {
     const { classId } = req.params;
 
-    // const studentCount = await Student.countDocuments({ classId });
-    // if (studentCount > 0) {
-    //   return res.status(400).json({
-    //     message: "Students exist in this class. Deactivate instead.",
-    //     data: [],
-    //     total: 0,
-    //   });
-    // }
-
-    await Class.findByIdAndDelete(classId);
+    await ClassSection.findByIdAndDelete(classId);
 
     res.json({ data: [], total: 0 });
   } catch (error) {

@@ -43,7 +43,7 @@ async function run() {
       await ClassSection.create({
         schoolId: SCHOOL_ID,
         classId: cls._id,
-        name: "Default",
+        sectionId: null,
         isDefault: true,
       });
     }

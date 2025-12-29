@@ -13,7 +13,10 @@ const classSectionSchema = new mongoose.Schema(
       ref: "Class",
       required: true,
     },
-    name: { type: String, required: true }, // "A", "B", "Default"
+    sectionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Section",
+    },
     isDefault: { type: Boolean, default: false },
     status: { type: String, enum: ["active", "inactive"], default: "active" },
   },
@@ -21,7 +24,7 @@ const classSectionSchema = new mongoose.Schema(
 );
 
 classSectionSchema.index(
-  { schoolId: 1, classId: 1, name: 1 },
+  { schoolId: 1, classId: 1, sectionId: 1 },
   { unique: true }
 );
 
