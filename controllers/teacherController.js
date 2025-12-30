@@ -5,7 +5,7 @@ const bcrypt = require("bcryptjs");
 // 🧾 1️⃣ Teacher self-register
 exports.registerTeacher = async (req, res) => {
   try {
-    const { name, email, password, schoolId, subject } = req.body;
+    const { name, email, password, schoolId, subjectIds } = req.body;
 
     const existingUser = await User.findOne({ email });
     if (existingUser)
@@ -27,7 +27,7 @@ exports.registerTeacher = async (req, res) => {
     const teacher = await Teacher.create({
       userId: user._id,
       schoolId,
-      subject,
+      subjectIds: subjectIds || [],
     });
 
     res.status(201).json({
@@ -42,7 +42,7 @@ exports.registerTeacher = async (req, res) => {
 // 🧾 0️⃣ Add Teacher by School Admin
 exports.addTeacherBySchoolAdmin = async (req, res) => {
   try {
-    const { name, email, subject, status, phone } = req.body;
+    const { name, email, subjectIds, status, phone } = req.body;
 
     if (!name || !email)
       return res.status(400).json({ message: "Name and email are required" });
@@ -71,7 +71,7 @@ exports.addTeacherBySchoolAdmin = async (req, res) => {
     const teacher = await Teacher.create({
       userId: user._id,
       schoolId,
-      subject,
+      subjectIds: subjectIds || [],
       phone,
       status,
     });
@@ -90,7 +90,7 @@ exports.addTeacherBySchoolAdmin = async (req, res) => {
 // 🧾 6️⃣ Update Teacher (Admin / School Admin)
 exports.updateTeacher = async (req, res) => {
   try {
-    const { name, email, phone, subject, status, password } = req.body;
+    const { name, email, phone, subjectIds, status, password } = req.body;
 
     const teacherId = req.params.id;
     // Step 1: Check teacher exists
@@ -113,21 +113,25 @@ exports.updateTeacher = async (req, res) => {
     const userUpdates = {};
     if (name) userUpdates.name = name;
     if (email) userUpdates.email = email;
-    if (password) userUpdates.password = password; // 🔐 Only if provided
+    if (password) {
+      const hash = await bcrypt.hash(password, 10);
+      userUpdates.password = hash; // 🔐 Hash password if provided
+    }
 
     await User.findByIdAndUpdate(userId, userUpdates);
 
     // Step 4: Update Teacher fields
     const teacherUpdates = {};
-    if (phone) teacherUpdates.phone = phone;
-    if (subject) teacherUpdates.subject = subject;
+    if (phone !== undefined) teacherUpdates.phone = phone;
+    if (subjectIds !== undefined) teacherUpdates.subjectIds = subjectIds;
     if (status) teacherUpdates.status = status;
 
     const updatedTeacher = await Teacher.findByIdAndUpdate(
       teacherId,
       teacherUpdates,
       { new: true }
-    ).populate("userId", "name email role");
+    ).populate("userId", "name email role")
+     .populate("subjectIds", "name");
 
     res.json({
       message: "Teacher updated successfully",
@@ -144,17 +148,20 @@ exports.getAllTeachers = async (req, res) => {
   try {
     const teachers = await Teacher.find()
       .populate("userId", "name email role")
-      .populate("schoolId", "name");
+      .populate("schoolId", "name")
+      .populate("subjectIds", "name");
 
     const formattedTeachers = teachers.map((t) => ({
       id: t._id,
+      _id: t._id,
       userId: t.userId?._id,
       name: t.userId?.name,
       email: t.userId?.email,
       role: t.userId?.role,
       school: t.schoolId?.name,
       status: t.status,
-      subject: t.subject,
+      subjectIds: t.subjectIds || [],
+      subjects: t.subjectIds?.map((s) => s.name).join(", ") || "",
       createdAt: t.createdAt,
       updatedAt: t.updatedAt,
       phone: t.phone,

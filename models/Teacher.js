@@ -18,7 +18,10 @@ const teacherSchema = new mongoose.Schema(
       type: String,
       trim: true,
     },
-    subject: { type: String },
+    subjectIds: [{
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Subject",
+    }],
     status: {
       type: String,
       enum: ["active", "pending", "rejected"],
