@@ -16,6 +16,7 @@ exports.addSubject = async (req, res) => {
         message: "Subject already exists",
         data: [],
         total: 0,
+        error,
       });
     }
     res.status(500).json({ data: [], total: 0 });

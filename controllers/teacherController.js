@@ -1,3 +1,4 @@
+const { default: mongoose } = require("mongoose");
 const Teacher = require("../models/Teacher");
 const User = require("../models/User");
 const bcrypt = require("bcryptjs");
@@ -130,8 +131,9 @@ exports.updateTeacher = async (req, res) => {
       teacherId,
       teacherUpdates,
       { new: true }
-    ).populate("userId", "name email role")
-     .populate("subjectIds", "name");
+    )
+      .populate("userId", "name email role")
+      .populate("subjectIds", "name");
 
     res.json({
       message: "Teacher updated successfully",
@@ -146,7 +148,8 @@ exports.updateTeacher = async (req, res) => {
 // 🧾 2️⃣ Get all teachers (Admin / School Admin)
 exports.getAllTeachers = async (req, res) => {
   try {
-    const teachers = await Teacher.find()
+    const schoolId = new mongoose.Types.ObjectId(req.user.schoolId);
+    const teachers = await Teacher.find({ schoolId })
       .populate("userId", "name email role")
       .populate("schoolId", "name")
       .populate("subjectIds", "name");

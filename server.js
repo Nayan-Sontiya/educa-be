@@ -25,6 +25,10 @@ app.use("/api/classes", require("./routes/classRoutes"));
 app.use("/api/sections", require("./routes/sectionRoutes"));
 app.use("/api/subjects", require("./routes/subjectRoutes"));
 app.use("/api/class-sections", require("./routes/classSectionRoutes"));
+app.use(
+  "/api/teacher-assignments",
+  require("./routes/teacherAssignmentRoutes")
+);
 
 app.get("/", (req, res) => res.send("EduVerse API is running 🚀"));
 

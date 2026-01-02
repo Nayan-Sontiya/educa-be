@@ -16,6 +16,7 @@ exports.addSection = async (req, res) => {
         message: "Section already exists",
         data: [],
         total: 0,
+        error,
       });
     }
     res.status(500).json({ data: [], total: 0 });
