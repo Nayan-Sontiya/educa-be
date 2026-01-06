@@ -247,3 +247,51 @@ exports.assignSubjectsToClass = async (req, res) => {
     });
   }
 };
+
+exports.unassignSubjectsFromClass = async (req, res) => {
+  try {
+    const { classId, subjectIds } = req.body;
+    const { schoolId } = req.user;
+
+    if (!classId || !Array.isArray(subjectIds) || subjectIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "classId and subjectIds array are required",
+      });
+    }
+
+    // Find all ClassSections for this class
+    const classSections = await ClassSection.find({
+      classId,
+      schoolId,
+    });
+
+    if (classSections.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No class sections found for this class",
+      });
+    }
+
+    const classSectionIds = classSections.map((cs) => cs._id);
+
+    // Delete ClassSubject records for these class sections and subjects
+    const result = await ClassSubject.deleteMany({
+      classSectionId: { $in: classSectionIds },
+      subjectId: { $in: subjectIds },
+      schoolId,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: "Subjects unassigned from class successfully",
+      deletedCount: result.deletedCount,
+    });
+  } catch (error) {
+    console.error("Error unassigning subjects from class:", error.message);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to unassign subjects from class",
+    });
+  }
+};

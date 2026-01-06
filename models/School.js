@@ -46,6 +46,12 @@ const schoolSchema = new mongoose.Schema(
       code: String,
       expiresAt: Date,
     },
+    // Leave management
+    paidLeaveCount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   },
   { timestamps: true }

@@ -9,9 +9,12 @@ const {
   sendOtp,
   verifyOtp,
   updateVerification,
+  updatePaidLeaveCount,
+  getMySchool,
 } = require("../controllers/schoolController");
 const protect = require("../middleware/authMiddleware");
 const roleCheck = require("../middleware/roleMiddleware");
+const adminAuth = () => roleCheck(["admin", "school_admin"]);
 
 // simple disk storage for uploads (ensure uploads/ exists)
 const storage = multer.diskStorage({
@@ -49,5 +52,11 @@ router.patch(
   roleCheck(["admin"]),
   updateVerification
 );
+
+// School admin: get school details
+router.get("/my-school", protect, adminAuth(), getMySchool);
+
+// School admin: update paid leave count
+router.put("/paid-leave-count", protect, adminAuth(), updatePaidLeaveCount);
 
 module.exports = router;

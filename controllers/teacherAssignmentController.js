@@ -86,7 +86,6 @@ exports.getMyAssignments = async (req, res) => {
         .status(403)
         .json({ message: "Teacher not active or not found" });
     }
-    console.log("Found teacher:", teacher);
     // 2. Fetch assignments using teacher._id
     const data = await TeacherAssignment.find({
       teacherId: teacher._id,

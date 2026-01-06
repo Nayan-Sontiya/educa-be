@@ -13,6 +13,8 @@ router.get("/class/:classId", protect, teacherAuth(), subjectCtrl.getSubjectsByC
 router.get("/", protect, teacherAuth(), subjectCtrl.getSubjects);
 // Assign subjects to class - allow teachers
 router.post("/assign-to-class", protect, teacherAuth(), subjectCtrl.assignSubjectsToClass);
+// Unassign subjects from class - allow teachers
+router.post("/unassign-from-class", protect, teacherAuth(), subjectCtrl.unassignSubjectsFromClass);
 // Admin only routes
 router.post("/", protect, auth(), subjectCtrl.addSubject);
 router.put("/:subjectId", protect, auth(), subjectCtrl.updateSubject);
