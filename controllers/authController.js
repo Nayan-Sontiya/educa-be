@@ -2,6 +2,7 @@
 const User = require("../models/User");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const Teacher = require("../models/Teacher");
 
 exports.registerUser = async (req, res) => {
   try {
@@ -21,11 +22,25 @@ exports.registerUser = async (req, res) => {
 exports.loginUser = async (req, res) => {
   try {
     const { email, password } = req.body;
+
     const user = await User.findOne({ email });
     if (!user) return res.status(400).json({ message: "Invalid credentials" });
 
     const match = await bcrypt.compare(password, user.password);
     if (!match) return res.status(400).json({ message: "Invalid credentials" });
+
+    // 👇 Check teacher status if role is teacher
+    if (user.role === "teacher") {
+      const teacher = await Teacher.findOne({ userId: user._id });
+
+      if (!teacher) {
+        return res.status(403).json({ message: "Teacher profile not found" });
+      }
+
+      if (teacher.status !== "active") {
+        return res.status(403).json({ message: "Your account is not active" });
+      }
+    }
 
     const token = jwt.sign(
       { id: user._id, role: user.role, schoolId: user.schoolId },
@@ -35,6 +50,7 @@ exports.loginUser = async (req, res) => {
 
     res.json({ token, user });
   } catch (error) {
+    console.error("loginUser error:", error);
     res.status(500).json({ message: "Error logging in" });
   }
 };

@@ -1,4 +1,6 @@
 const Subject = require("../models/Subject");
+const ClassSubject = require("../models/ClassSubject");
+const ClassSection = require("../models/ClassSection");
 
 exports.addSubject = async (req, res) => {
   try {
@@ -9,10 +11,11 @@ exports.addSubject = async (req, res) => {
       name,
     });
 
-    res.status(201).json({ data: subject, total: 1 });
+    res.status(201).json({ success: true, data: subject, total: 1 });
   } catch (error) {
     if (error.code === 11000) {
       return res.status(400).json({
+        success: false,
         message: "Subject already exists",
         data: [],
         total: 0,
@@ -31,6 +34,7 @@ exports.updateSubject = async (req, res) => {
 
     if (!name) {
       return res.status(400).json({
+        success: false,
         message: "Name is required",
         data: [],
         total: 0,
@@ -46,6 +50,7 @@ exports.updateSubject = async (req, res) => {
 
     if (existing) {
       return res.status(400).json({
+        success: false,
         message: "Subject already exists",
         data: [],
         total: 0,
@@ -60,6 +65,7 @@ exports.updateSubject = async (req, res) => {
 
     if (!updated) {
       return res.status(404).json({
+        success: false,
         message: "Subject not found",
         data: [],
         total: 0,
@@ -67,11 +73,13 @@ exports.updateSubject = async (req, res) => {
     }
 
     res.json({
+      success: true,
       data: updated,
       total: 1,
     });
   } catch (error) {
     res.status(500).json({
+      success: false,
       message: "Server error",
       data: [],
       total: 0,
@@ -95,34 +103,58 @@ exports.deleteSubject = async (req, res) => {
 
     await Subject.findByIdAndDelete(subjectId);
 
-    res.json({ data: [], total: 0 });
+    res.json({ success: true, data: [], total: 0, message: "Subject deleted successfully" });
   } catch (e) {
-    res.status(500).json({ data: [], total: 0 });
+    res.status(500).json({ success: false, data: [], total: 0, message: e.message });
   }
 };
 
 exports.getSubjectsByClass = async (req, res) => {
   try {
     const { classId } = req.params;
+    const { schoolId } = req.user;
 
-    const subjects = await Subject.find({ classId }).sort({ name: 1 });
+    // Find all ClassSections for this class
+    const classSections = await ClassSection.find({
+      classId,
+      schoolId,
+    }).select("_id");
 
-    const formatted = subjects.map((s) => ({
-      id: s._id,
-      name: s.name,
-      createdAt: s.createdAt,
-      updatedAt: s.updatedAt,
-    }));
+    const classSectionIds = classSections.map((cs) => cs._id);
+
+    // Find all subjects assigned to these class sections
+    const classSubjects = await ClassSubject.find({
+      classSectionId: { $in: classSectionIds },
+      status: "active",
+    }).populate("subjectId", "name _id");
+
+    // Extract unique subjects
+    const subjectMap = new Map();
+    classSubjects.forEach((cs) => {
+      if (cs.subjectId && !subjectMap.has(cs.subjectId._id.toString())) {
+        subjectMap.set(cs.subjectId._id.toString(), {
+          _id: cs.subjectId._id,
+          name: cs.subjectId.name,
+        });
+      }
+    });
+
+    const formatted = Array.from(subjectMap.values()).sort((a, b) =>
+      a.name.localeCompare(b.name)
+    );
 
     res.status(200).json({
+      success: true,
       data: formatted,
       total: formatted.length,
     });
   } catch (error) {
-    console.error("Error fetching subjects:", error.message);
+    console.error("Error fetching subjects by class:", error.message);
     res.status(500).json({
+      success: false,
       data: [],
       total: 0,
+      message: error.message,
     });
   }
 };
@@ -133,14 +165,85 @@ exports.getSubjects = async (req, res) => {
     const subjects = await Subject.find({ schoolId }).sort({ name: 1 });
 
     res.status(200).json({
+      success: true,
       data: subjects,
       total: subjects.length,
     });
   } catch (error) {
     console.error("Error fetching subjects:", error.message);
     res.status(500).json({
+      success: false,
       data: [],
       total: 0,
+      message: error.message,
+    });
+  }
+};
+
+exports.assignSubjectsToClass = async (req, res) => {
+  try {
+    const { classId, subjectIds } = req.body;
+    const { schoolId } = req.user;
+
+    if (!classId || !Array.isArray(subjectIds) || subjectIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "classId and subjectIds array are required",
+      });
+    }
+
+    // Find all ClassSections for this class
+    const classSections = await ClassSection.find({
+      classId,
+      schoolId,
+    });
+
+    if (classSections.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No class sections found for this class",
+      });
+    }
+
+    // For each class section, assign the subjects
+    const assignments = [];
+    for (const classSection of classSections) {
+      for (const subjectId of subjectIds) {
+        try {
+          // Check if assignment already exists
+          const existing = await ClassSubject.findOne({
+            classSectionId: classSection._id,
+            subjectId,
+          });
+
+          if (!existing) {
+            const assignment = await ClassSubject.create({
+              schoolId,
+              classSectionId: classSection._id,
+              subjectId,
+              status: "active",
+            });
+            assignments.push(assignment);
+          }
+        } catch (error) {
+          // Skip if duplicate (unique constraint)
+          if (error.code !== 11000) {
+            console.error("Error assigning subject:", error);
+          }
+        }
+      }
+    }
+
+    res.status(201).json({
+      success: true,
+      data: assignments,
+      message: "Subjects assigned to class successfully",
+    });
+  } catch (error) {
+    console.error("Error assigning subjects to class:", error.message);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to assign subjects to class",
     });
   }
 };

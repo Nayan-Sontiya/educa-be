@@ -4,10 +4,16 @@ const subjectCtrl = require("../controllers/subjectController");
 const roleCheck = require("../middleware/roleMiddleware");
 const protect = require("../middleware/authMiddleware");
 const auth = () => roleCheck(["admin", "school_admin"]);
+const teacherAuth = () => roleCheck(["admin", "school_admin", "teacher"]);
 
 // SUBJECT ROUTES
-router.get("/:classId", protect, auth(), subjectCtrl.getSubjectsByClass);
-router.get("/", protect, auth(), subjectCtrl.getSubjects);
+// Get subjects by class - allow teachers
+router.get("/class/:classId", protect, teacherAuth(), subjectCtrl.getSubjectsByClass);
+// Get all school subjects - allow teachers
+router.get("/", protect, teacherAuth(), subjectCtrl.getSubjects);
+// Assign subjects to class - allow teachers
+router.post("/assign-to-class", protect, teacherAuth(), subjectCtrl.assignSubjectsToClass);
+// Admin only routes
 router.post("/", protect, auth(), subjectCtrl.addSubject);
 router.put("/:subjectId", protect, auth(), subjectCtrl.updateSubject);
 router.delete("/:subjectId", protect, auth(), subjectCtrl.deleteSubject);

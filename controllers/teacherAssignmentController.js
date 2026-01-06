@@ -1,3 +1,4 @@
+const Teacher = require("../models/Teacher");
 const TeacherAssignment = require("../models/TeacherAssignment");
 
 exports.assignTeacher = async (req, res) => {
@@ -71,15 +72,66 @@ exports.getAssignments = async (req, res) => {
 };
 
 exports.getMyAssignments = async (req, res) => {
-  const data = await TeacherAssignment.find({
-    teacherId: req.user._id,
-    status: "active",
-  })
-    .populate({
-      path: "classSectionId",
-      populate: { path: "classId", select: "name order" },
-    })
-    .populate("subjectId", "name");
+  try {
+    console.log("Fetching assignments for user:", req.user.id);
 
-  res.json({ data });
+    // 1. Find teacher by userId
+    const teacher = await Teacher.findOne({
+      userId: req.user.id,
+      status: "active",
+    });
+
+    if (!teacher) {
+      return res
+        .status(403)
+        .json({ message: "Teacher not active or not found" });
+    }
+    console.log("Found teacher:", teacher);
+    // 2. Fetch assignments using teacher._id
+    const data = await TeacherAssignment.find({
+      teacherId: teacher._id,
+      status: "active",
+    }).populate({
+      path: "classSectionId",
+      populate: [
+        { path: "classId", select: "name order" },
+        { path: "sectionId", select: "name" },
+      ],
+    });
+
+    res.json({ data });
+  } catch (err) {
+    console.error("getMyAssignments error:", err);
+    res.status(500).json({ message: "Failed to fetch assignments" });
+  }
+};
+
+exports.getAssignmentsByClassSection = async (req, res) => {
+  try {
+    const { classSectionId } = req.params;
+
+    const data = await TeacherAssignment.find({
+      classSectionId,
+      status: "active",
+    })
+      .populate({
+        path: "teacherId",
+        populate: [
+          { path: "userId", select: "name email" },
+          { path: "subjectIds", select: "name" },
+        ],
+      })
+      .populate({
+        path: "classSectionId",
+        populate: [
+          { path: "classId", select: "name order" },
+          { path: "sectionId", select: "name" },
+        ],
+      });
+
+    res.json({ data });
+  } catch (err) {
+    console.error("getAssignmentsByClassSection error:", err);
+    res.status(500).json({ message: "Failed to fetch assignments" });
+  }
 };

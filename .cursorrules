@@ -1,0 +1,629 @@
+# Educa Backend - Node.js/Express Cursor Rules
+
+This file provides coding standards and guidelines for Cursor AI to follow when working on this Node.js/Express/MongoDB backend codebase.
+
+## Core Principles
+- **RESTful API**: Follow REST conventions for endpoints
+- **MVC Pattern**: Separate concerns (Models, Controllers, Routes)
+- **Middleware**: Use middleware for authentication, validation, and error handling
+- **MongoDB/Mongoose**: Use Mongoose for database operations
+- **JWT Authentication**: Use JWT tokens for authentication
+- **Error Handling**: Consistent error handling across all routes
+- **Code Organization**: Clear separation of concerns
+
+## Project Structure
+
+```
+config/          # Configuration files (database, etc.)
+controllers/     # Route controllers (business logic)
+middleware/      # Custom middleware (auth, validation, etc.)
+models/          # Mongoose models
+routes/          # Express route definitions
+utils/           # Utility functions
+scripts/         # Utility scripts
+uploads/         # File uploads directory
+server.js        # Main application entry point
+```
+
+## Code Standards
+
+### ✅ CORRECT Patterns:
+
+```javascript
+// ✅ GOOD: Controller pattern
+const createUser = async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+    
+    // Validation
+    if (!name || !email || !password) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'All fields are required' 
+      });
+    }
+    
+    // Business logic
+    const user = await User.create({ name, email, password });
+    
+    res.status(201).json({
+      success: true,
+      data: user,
+      message: 'User created successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+};
+
+// ✅ GOOD: Route definition
+const express = require('express');
+const router = express.Router();
+const { createUser, getUsers } = require('../controllers/userController');
+const { authenticate } = require('../middleware/authMiddleware');
+
+router.post('/', authenticate, createUser);
+router.get('/', authenticate, getUsers);
+
+module.exports = router;
+```
+
+### ❌ FORBIDDEN:
+- Mixing business logic in routes
+- Missing error handling
+- Not using try-catch blocks
+- Inconsistent response format
+
+## API Response Standards (CRITICAL)
+
+### ✅ REQUIRED: Consistent Response Format
+
+**ALL API responses MUST follow this pattern:**
+
+```javascript
+// ✅ GOOD: Success response
+res.status(200).json({
+  success: true,
+  data: result,
+  message: 'Operation successful'
+});
+
+// ✅ GOOD: Error response
+res.status(400).json({
+  success: false,
+  message: 'Error message here'
+});
+
+// ✅ GOOD: List response
+res.status(200).json({
+  success: true,
+  data: items,
+  count: items.length,
+  message: 'Items retrieved successfully'
+});
+```
+
+### Response Status Codes:
+- `200` - Success (GET, PUT, PATCH)
+- `201` - Created (POST)
+- `400` - Bad Request (validation errors)
+- `401` - Unauthorized (authentication required)
+- `403` - Forbidden (insufficient permissions)
+- `404` - Not Found
+- `500` - Internal Server Error
+
+### ❌ FORBIDDEN:
+- Inconsistent response formats
+- Missing success flag
+- Not using proper HTTP status codes
+
+## Authentication & Authorization
+
+### ✅ REQUIRED: JWT Middleware
+
+```javascript
+// ✅ GOOD: Using auth middleware
+const { authenticate } = require('../middleware/authMiddleware');
+const { authorize } = require('../middleware/roleMiddleware');
+
+router.get('/admin', authenticate, authorize('admin'), getAdminData);
+router.post('/users', authenticate, authorize('admin', 'teacher'), createUser);
+```
+
+### ✅ JWT Token Structure:
+
+```javascript
+// ✅ GOOD: Token generation
+const jwt = require('jsonwebtoken');
+
+const generateToken = (userId, role) => {
+  return jwt.sign(
+    { userId, role },
+    process.env.JWT_SECRET,
+    { expiresIn: '7d' }
+  );
+};
+```
+
+### ❌ FORBIDDEN:
+- Missing authentication on protected routes
+- Not validating tokens properly
+- Exposing sensitive data in tokens
+
+## Database Standards (MongoDB/Mongoose)
+
+### ✅ CORRECT:
+
+```javascript
+// ✅ GOOD: Mongoose model
+const mongoose = require('mongoose');
+
+const userSchema = new mongoose.Schema({
+  name: {
+    type: String,
+    required: [true, 'Name is required'],
+    trim: true
+  },
+  email: {
+    type: String,
+    required: [true, 'Email is required'],
+    unique: true,
+    lowercase: true,
+    trim: true
+  },
+  password: {
+    type: String,
+    required: [true, 'Password is required'],
+    minlength: 6
+  },
+  role: {
+    type: String,
+    enum: ['admin', 'teacher', 'parent'],
+    default: 'parent'
+  }
+}, {
+  timestamps: true
+});
+
+module.exports = mongoose.model('User', userSchema);
+```
+
+### ✅ Database Operations:
+
+```javascript
+// ✅ GOOD: Using async/await
+const getUser = async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+    
+    res.status(200).json({
+      success: true,
+      data: user
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message
+    });
+  }
+};
+```
+
+### ❌ FORBIDDEN:
+- Not handling null/undefined results
+- Missing error handling
+- Not using async/await properly
+- Not validating input data
+
+## Middleware Standards
+
+### ✅ CORRECT:
+
+```javascript
+// ✅ GOOD: Authentication middleware
+const jwt = require('jsonwebtoken');
+
+const authenticate = async (req, res, next) => {
+  try {
+    const token = req.headers.authorization?.split(' ')[1];
+    
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        message: 'Authentication required'
+      });
+    }
+    
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    req.user = decoded;
+    next();
+  } catch (error) {
+    res.status(401).json({
+      success: false,
+      message: 'Invalid or expired token'
+    });
+  }
+};
+
+module.exports = { authenticate };
+```
+
+### ❌ FORBIDDEN:
+- Not handling errors in middleware
+- Missing next() call
+- Not validating tokens properly
+
+## File Upload Standards
+
+### ✅ CORRECT:
+
+```javascript
+// ✅ GOOD: Multer configuration
+const multer = require('multer');
+const path = require('path');
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, 'uploads/');
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({
+  storage: storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = /jpeg|jpg|png|gif|svg/;
+    const extname = allowedTypes.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = allowedTypes.test(file.mimetype);
+    
+    if (mimetype && extname) {
+      return cb(null, true);
+    } else {
+      cb(new Error('Only image files are allowed'));
+    }
+  }
+});
+
+module.exports = upload;
+```
+
+## Error Handling Standards
+
+### ✅ CORRECT:
+
+```javascript
+// ✅ GOOD: Comprehensive error handling
+const createUser = async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+    
+    // Validation
+    if (!name || !email || !password) {
+      return res.status(400).json({
+        success: false,
+        message: 'All fields are required'
+      });
+    }
+    
+    // Check if user exists
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: 'User already exists'
+      });
+    }
+    
+    // Create user
+    const user = await User.create({ name, email, password });
+    
+    res.status(201).json({
+      success: true,
+      data: user,
+      message: 'User created successfully'
+    });
+  } catch (error) {
+    // Handle Mongoose validation errors
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map(err => err.message);
+      return res.status(400).json({
+        success: false,
+        message: messages.join(', ')
+      });
+    }
+    
+    // Handle duplicate key errors
+    if (error.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        message: 'Duplicate field value entered'
+      });
+    }
+    
+    // Generic error
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+};
+```
+
+## File Naming Conventions
+
+- **Controllers**: camelCase ending with "Controller" (e.g., `userController.js`, `authController.js`)
+- **Models**: PascalCase (e.g., `User.js`, `School.js`)
+- **Routes**: camelCase ending with "Routes" (e.g., `userRoutes.js`, `authRoutes.js`)
+- **Middleware**: camelCase ending with "Middleware" (e.g., `authMiddleware.js`, `roleMiddleware.js`)
+- **Utils**: camelCase (e.g., `createDefaultClasses.js`, `udiseService.js`)
+- **Config**: camelCase (e.g., `db.js`)
+
+## Import/Require Standards
+
+### ✅ CORRECT:
+
+```javascript
+// ✅ GOOD: External packages first
+const express = require('express');
+const mongoose = require('mongoose');
+const jwt = require('jsonwebtoken');
+
+// ✅ GOOD: Internal modules
+const User = require('../models/User');
+const { authenticate } = require('../middleware/authMiddleware');
+const { createUser, getUsers } = require('../controllers/userController');
+```
+
+## Environment Variables
+
+### ✅ REQUIRED:
+
+```javascript
+// ✅ GOOD: Using environment variables
+require('dotenv').config();
+
+const PORT = process.env.PORT || 5000;
+const MONGO_URI = process.env.MONGO_URI;
+const JWT_SECRET = process.env.JWT_SECRET;
+```
+
+### Required Environment Variables:
+- `PORT` - Server port (default: 5000)
+- `MONGO_URI` - MongoDB connection string
+- `JWT_SECRET` - Secret key for JWT tokens
+
+## Code Style
+
+- **Indentation**: 2 spaces
+- **Quotes**: Single quotes for strings
+- **Semicolons**: Use semicolons consistently
+- **Line Length**: Maximum 100 characters
+- **Trailing Commas**: Use in objects and arrays
+- **Arrow Functions**: Use for callbacks, prefer function declarations for named functions
+
+## Security Best Practices
+
+### ✅ REQUIRED:
+
+```javascript
+// ✅ GOOD: Password hashing
+const bcrypt = require('bcryptjs');
+
+const hashedPassword = await bcrypt.hash(password, 10);
+const isMatch = await bcrypt.compare(password, hashedPassword);
+
+// ✅ GOOD: Input validation
+if (!email || !password) {
+  return res.status(400).json({
+    success: false,
+    message: 'Email and password are required'
+  });
+}
+
+// ✅ GOOD: Sanitizing user input
+const sanitizedEmail = email.toLowerCase().trim();
+```
+
+### ❌ FORBIDDEN:
+- Storing plain text passwords
+- Not validating user input
+- Exposing sensitive data in responses
+- Not using HTTPS in production
+
+## Common Mistakes to Avoid
+
+1. **Missing error handling** - Always use try-catch blocks
+2. **Inconsistent response format** - Always use standard response format
+3. **Not validating input** - Always validate user input
+4. **Missing authentication** - Protect routes with middleware
+5. **Not handling null results** - Always check if data exists
+6. **Hardcoded values** - Use environment variables
+7. **Not using async/await** - Use async/await instead of callbacks
+8. **Missing status codes** - Use proper HTTP status codes
+
+## When Creating New Features
+
+1. Create Mongoose model in `models/`
+2. Create controller in `controllers/`
+3. Create routes in `routes/`
+4. Add middleware if needed in `middleware/`
+5. Register routes in `server.js`
+6. Use consistent response format
+7. Add proper error handling
+8. Add input validation
+9. Use authentication middleware for protected routes
+10. Follow file naming conventions
+
+## Example Controller Template
+
+```javascript
+const Model = require('../models/Model');
+
+// Get all items
+const getItems = async (req, res) => {
+  try {
+    const items = await Model.find();
+    
+    res.status(200).json({
+      success: true,
+      data: items,
+      count: items.length,
+      message: 'Items retrieved successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+};
+
+// Get single item
+const getItem = async (req, res) => {
+  try {
+    const item = await Model.findById(req.params.id);
+    
+    if (!item) {
+      return res.status(404).json({
+        success: false,
+        message: 'Item not found'
+      });
+    }
+    
+    res.status(200).json({
+      success: true,
+      data: item,
+      message: 'Item retrieved successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+};
+
+// Create item
+const createItem = async (req, res) => {
+  try {
+    const { field1, field2 } = req.body;
+    
+    if (!field1 || !field2) {
+      return res.status(400).json({
+        success: false,
+        message: 'All fields are required'
+      });
+    }
+    
+    const item = await Model.create({ field1, field2 });
+    
+    res.status(201).json({
+      success: true,
+      data: item,
+      message: 'Item created successfully'
+    });
+  } catch (error) {
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map(err => err.message);
+      return res.status(400).json({
+        success: false,
+        message: messages.join(', ')
+      });
+    }
+    
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+};
+
+// Update item
+const updateItem = async (req, res) => {
+  try {
+    const item = await Model.findByIdAndUpdate(
+      req.params.id,
+      req.body,
+      { new: true, runValidators: true }
+    );
+    
+    if (!item) {
+      return res.status(404).json({
+        success: false,
+        message: 'Item not found'
+      });
+    }
+    
+    res.status(200).json({
+      success: true,
+      data: item,
+      message: 'Item updated successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+};
+
+// Delete item
+const deleteItem = async (req, res) => {
+  try {
+    const item = await Model.findByIdAndDelete(req.params.id);
+    
+    if (!item) {
+      return res.status(404).json({
+        success: false,
+        message: 'Item not found'
+      });
+    }
+    
+    res.status(200).json({
+      success: true,
+      message: 'Item deleted successfully'
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Server error'
+    });
+  }
+};
+
+module.exports = {
+  getItems,
+  getItem,
+  createItem,
+  updateItem,
+  deleteItem
+};
+```
+
+## Critical Reminders
+
+1. **ALWAYS** use consistent response format
+2. **ALWAYS** handle errors with try-catch
+3. **ALWAYS** validate user input
+4. **ALWAYS** use authentication middleware for protected routes
+5. **ALWAYS** use proper HTTP status codes
+6. **ALWAYS** hash passwords before storing
+7. **ALWAYS** check if data exists before operations
+8. **ALWAYS** use async/await for database operations
+9. **NEVER** expose sensitive data in responses
+10. **NEVER** store plain text passwords
+
