@@ -26,22 +26,41 @@ exports.applyLeave = async (req, res) => {
     const start = new Date(startDate);
     const end = new Date(endDate);
 
-    if (start >= end) {
+    if (start > end) {
       return res.status(400).json({
         success: false,
-        message: "End date must be after start date",
+        message: "End date must be on or after start date",
       });
     }
 
-    if (start < new Date()) {
+    // Compare dates only (ignore time)
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const startDateOnly = new Date(start);
+    startDateOnly.setHours(0, 0, 0, 0);
+    
+    if (startDateOnly < today) {
       return res.status(400).json({
         success: false,
         message: "Start date cannot be in the past",
       });
     }
 
-    // Calculate days
-    const days = Math.ceil((end - start) / (1000 * 60 * 60 * 24)) + 1;
+    // Calculate days (excluding Sundays)
+    const calculateDaysExcludingSundays = (startDate, endDate) => {
+      let count = 0;
+      const current = new Date(startDate);
+      const end = new Date(endDate);
+      while (current <= end) {
+        if (current.getDay() !== 0) { // Not Sunday (0 = Sunday)
+          count++;
+        }
+        current.setDate(current.getDate() + 1);
+      }
+      return count;
+    };
+    
+    const days = calculateDaysExcludingSundays(start, end);
 
     // Find teacher
     const teacher = await Teacher.findOne({
