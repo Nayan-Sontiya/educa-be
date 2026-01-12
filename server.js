@@ -13,6 +13,10 @@ app.use(express.json());
 app.use(cors());
 app.use(morgan("dev"));
 
+// Serve uploaded files statically
+const path = require("path");
+app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+
 // DB Connection
 connectDB();
 
@@ -30,6 +34,7 @@ app.use(
   require("./routes/teacherAssignmentRoutes")
 );
 app.use("/api/leaves", require("./routes/leaveRoutes"));
+app.use("/api/notices", require("./routes/noticeRoutes"));
 
 app.get("/", (req, res) => res.send("EduVerse API is running 🚀"));
 
