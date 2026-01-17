@@ -52,6 +52,33 @@ const schoolSchema = new mongoose.Schema(
       default: 0,
       min: 0,
     },
+    // School listing information (for public discovery platform)
+    listing: {
+      // Gallery images (max 10)
+      gallery: [
+        {
+          type: String, // File path
+        },
+      ],
+      about: { type: String, trim: true },
+      vision: { type: String, trim: true },
+      mission: { type: String, trim: true },
+      contactNumber: { type: String, trim: true },
+      contactEmail: { type: String, trim: true },
+      websiteUrl: { type: String, trim: true },
+      admissionStatus: {
+        type: String,
+        enum: ["open", "closed"],
+        default: "closed",
+      },
+      facilities: [String], // Array of facility names
+      // Google Maps location
+      mapLocation: {
+        latitude: Number,
+        longitude: Number,
+        address: String,
+      },
+    },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   },
   { timestamps: true }

@@ -35,6 +35,7 @@ app.use(
 );
 app.use("/api/leaves", require("./routes/leaveRoutes"));
 app.use("/api/notices", require("./routes/noticeRoutes"));
+app.use("/api/reviews", require("./routes/reviewRoutes"));
 
 app.get("/", (req, res) => res.send("EduVerse API is running 🚀"));
 

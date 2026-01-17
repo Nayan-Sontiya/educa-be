@@ -1,6 +1,7 @@
 // controllers/schoolController.js
 const School = require("../models/School");
 const User = require("../models/User");
+const Review = require("../models/Review");
 const bcrypt = require("bcryptjs");
 const udiseService = require("../utils/udiseService");
 const { createDefaultClasses } = require("../utils/createDefaultClasses");
@@ -137,6 +138,123 @@ exports.getSchools = async (req, res) => {
   }
 };
 
+// Get a single school with review summaries (for school detail page)
+exports.getSchoolWithReviews = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const school = await School.findById(id)
+      .select("name city state pincode email phone listing verificationStatus")
+      .lean();
+
+    if (!school) {
+      return res.status(404).json({
+        success: false,
+        message: "School not found",
+      });
+    }
+
+    // Only return verified schools
+    if (school.verificationStatus !== "Verified") {
+      return res.status(404).json({
+        success: false,
+        message: "School not found",
+      });
+    }
+
+    // Get review summaries
+    const reviewStats = await Review.getAverageRating(school._id);
+
+    res.json({
+      success: true,
+      data: {
+        ...school,
+        reviewStats: {
+          averageRating: reviewStats.averageRating,
+          totalReviews: reviewStats.totalReviews,
+          ratingDistribution: reviewStats.ratingDistribution,
+        },
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching school with reviews:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching school",
+    });
+  }
+};
+
+// Get all schools with review summaries (for public school listing/discovery page)
+exports.getSchoolsWithReviews = async (req, res) => {
+  try {
+    const { city, state, search, minRating, page = 1, limit = 20 } = req.query;
+
+    const query = { verificationStatus: "Verified" }; // Only show verified schools
+
+    if (city) query.city = { $regex: city, $options: "i" };
+    if (state) query.state = { $regex: state, $options: "i" };
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: "i" } },
+        { city: { $regex: search, $options: "i" } },
+        { state: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+
+    const schools = await School.find(query)
+      .select("name city state pincode email phone listing verificationStatus")
+      .skip(skip)
+      .limit(parseInt(limit))
+      .lean();
+
+    // Get review summaries for each school
+    const schoolsWithReviews = await Promise.all(
+      schools.map(async (school) => {
+        const reviewStats = await Review.getAverageRating(school._id);
+        
+        // Filter by minRating if provided
+        if (minRating && reviewStats.averageRating < parseFloat(minRating)) {
+          return null;
+        }
+
+        return {
+          ...school,
+          reviewStats: {
+            averageRating: reviewStats.averageRating,
+            totalReviews: reviewStats.totalReviews,
+            ratingDistribution: reviewStats.ratingDistribution,
+          },
+        };
+      })
+    );
+
+    // Remove null entries (filtered out by minRating)
+    const filteredSchools = schoolsWithReviews.filter((school) => school !== null);
+
+    const total = await School.countDocuments(query);
+
+    res.json({
+      success: true,
+      data: filteredSchools,
+      pagination: {
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        pages: Math.ceil(total / parseInt(limit)),
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching schools with reviews:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error fetching schools",
+    });
+  }
+};
+
 // Dev: send OTP to mobile (stores OTP on school record or returns to client for dev)
 exports.sendOtp = async (req, res) => {
   try {
@@ -238,7 +356,7 @@ exports.getMySchool = async (req, res) => {
     const { schoolId } = req.user;
 
     const school = await School.findById(schoolId).select(
-      "name email paidLeaveCount verificationStatus"
+      "name email paidLeaveCount verificationStatus listing"
     );
 
     if (!school) {
@@ -257,6 +375,200 @@ exports.getMySchool = async (req, res) => {
     res.status(500).json({
       success: false,
       message: error.message || "Failed to fetch school",
+    });
+  }
+};
+
+// Get school listing information
+exports.getSchoolListing = async (req, res) => {
+  try {
+    const { schoolId } = req.user;
+
+    const school = await School.findById(schoolId).select(
+      "name listing verificationStatus"
+    );
+
+    if (!school) {
+      return res.status(404).json({
+        success: false,
+        message: "School not found",
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        name: school.name,
+        listing: school.listing || {},
+        verificationStatus: school.verificationStatus,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching school listing:", error.message);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to fetch school listing",
+    });
+  }
+};
+
+// Update school listing information
+exports.updateSchoolListing = async (req, res) => {
+  try {
+    const { schoolId } = req.user;
+    const {
+      about,
+      vision,
+      mission,
+      contactNumber,
+      contactEmail,
+      websiteUrl,
+      admissionStatus,
+      facilities,
+      mapLocation,
+    } = req.body;
+
+    const school = await School.findById(schoolId);
+
+    if (!school) {
+      return res.status(404).json({
+        success: false,
+        message: "School not found",
+      });
+    }
+
+    // Initialize listing if it doesn't exist
+    if (!school.listing) {
+      school.listing = {};
+    }
+
+    // Update fields if provided
+    if (about !== undefined) school.listing.about = about;
+    if (vision !== undefined) school.listing.vision = vision;
+    if (mission !== undefined) school.listing.mission = mission;
+    if (contactNumber !== undefined)
+      school.listing.contactNumber = contactNumber;
+    if (contactEmail !== undefined) school.listing.contactEmail = contactEmail;
+    if (websiteUrl !== undefined) school.listing.websiteUrl = websiteUrl;
+    if (admissionStatus !== undefined) {
+      if (["open", "closed"].includes(admissionStatus)) {
+        school.listing.admissionStatus = admissionStatus;
+      }
+    }
+    if (facilities !== undefined) {
+      school.listing.facilities = Array.isArray(facilities) ? facilities : [];
+    }
+    if (mapLocation !== undefined) {
+      school.listing.mapLocation = mapLocation;
+    }
+
+    await school.save();
+
+    res.status(200).json({
+      success: true,
+      data: school.listing,
+      message: "School listing updated successfully",
+    });
+  } catch (error) {
+    console.error("Error updating school listing:", error.message);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to update school listing",
+    });
+  }
+};
+
+// Update school gallery
+exports.updateSchoolGallery = async (req, res) => {
+  try {
+    const { schoolId } = req.user;
+    const files = req.files || {};
+    const galleryFiles = files.gallery || [];
+
+    const school = await School.findById(schoolId);
+
+    if (!school) {
+      return res.status(404).json({
+        success: false,
+        message: "School not found",
+      });
+    }
+
+    // Initialize listing if it doesn't exist
+    if (!school.listing) {
+      school.listing = {};
+    }
+    if (!school.listing.gallery) {
+      school.listing.gallery = [];
+    }
+
+    // Add new images (max 10 total)
+    const newImages = galleryFiles.map((file) => file.path);
+    const totalImages = school.listing.gallery.length + newImages.length;
+
+    if (totalImages > 10) {
+      return res.status(400).json({
+        success: false,
+        message: "Maximum 10 images allowed in gallery",
+      });
+    }
+
+    school.listing.gallery = [...school.listing.gallery, ...newImages];
+
+    await school.save();
+
+    res.status(200).json({
+      success: true,
+      data: school.listing.gallery,
+      message: "Gallery updated successfully",
+    });
+  } catch (error) {
+    console.error("Error updating school gallery:", error.message);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to update school gallery",
+    });
+  }
+};
+
+// Remove image from gallery
+exports.removeGalleryImage = async (req, res) => {
+  try {
+    const { schoolId } = req.user;
+    const { imagePath } = req.body;
+
+    if (!imagePath) {
+      return res.status(400).json({
+        success: false,
+        message: "Image path is required",
+      });
+    }
+
+    const school = await School.findById(schoolId);
+
+    if (!school || !school.listing || !school.listing.gallery) {
+      return res.status(404).json({
+        success: false,
+        message: "School or gallery not found",
+      });
+    }
+
+    school.listing.gallery = school.listing.gallery.filter(
+      (path) => path !== imagePath
+    );
+
+    await school.save();
+
+    res.status(200).json({
+      success: true,
+      data: school.listing.gallery,
+      message: "Image removed successfully",
+    });
+  } catch (error) {
+    console.error("Error removing gallery image:", error.message);
+    res.status(500).json({
+      success: false,
+      message: error.message || "Failed to remove gallery image",
     });
   }
 };

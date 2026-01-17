@@ -6,11 +6,17 @@ const path = require("path");
 const {
   registerSchool,
   getSchools,
+  getSchoolsWithReviews,
+  getSchoolWithReviews,
   sendOtp,
   verifyOtp,
   updateVerification,
   updatePaidLeaveCount,
   getMySchool,
+  getSchoolListing,
+  updateSchoolListing,
+  updateSchoolGallery,
+  removeGalleryImage,
 } = require("../controllers/schoolController");
 const protect = require("../middleware/authMiddleware");
 const roleCheck = require("../middleware/roleMiddleware");
@@ -44,6 +50,8 @@ router.post("/send-otp", sendOtp);
 router.post("/verify-otp", verifyOtp);
 
 router.get("/", getSchools); // public route for listing schools
+router.get("/discover", getSchoolsWithReviews); // public route for school discovery with reviews
+router.get("/discover/:id", getSchoolWithReviews); // public route for single school detail with reviews
 
 // Admin: update verification status
 router.patch(
@@ -58,5 +66,17 @@ router.get("/my-school", protect, adminAuth(), getMySchool);
 
 // School admin: update paid leave count
 router.put("/paid-leave-count", protect, adminAuth(), updatePaidLeaveCount);
+
+// School admin: manage school listing
+router.get("/listing", protect, adminAuth(), getSchoolListing);
+router.put("/listing", protect, adminAuth(), updateSchoolListing);
+router.post(
+  "/listing/gallery",
+  protect,
+  adminAuth(),
+  upload.array("gallery", 10),
+  updateSchoolGallery
+);
+router.delete("/listing/gallery", protect, adminAuth(), removeGalleryImage);
 
 module.exports = router;
