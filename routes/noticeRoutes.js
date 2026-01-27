@@ -15,6 +15,7 @@ const {
 const roleCheck = require("../middleware/roleMiddleware");
 const protect = require("../middleware/authMiddleware");
 const upload = require("../middleware/uploadMiddleware");
+const { getFileUrl } = require("../utils/fileUrlHelper");
 const adminAuth = () => roleCheck(["admin", "school_admin"]);
 const teacherAuth = () => roleCheck(["admin", "school_admin", "teacher"]);
 
@@ -29,9 +30,9 @@ router.post("/upload", protect, adminAuth(), upload.array("files", 10), async (r
     }
 
     const uploadedFiles = req.files.map((file) => {
-      // Construct file URL - use /api/uploads to match the static route
-      const baseUrl = process.env.BASE_URL || `${req.protocol}://${req.get("host")}`;
-      const fileUrl = `${baseUrl}/uploads/${file.filename}`;
+      // Convert absolute path to relative path, then to full URL
+      const relativePath = `uploads/${file.filename}`;
+      const fileUrl = getFileUrl(relativePath, req);
       
       // Determine file type
       let fileType = "pdf";

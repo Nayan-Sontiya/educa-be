@@ -5,6 +5,7 @@ const Review = require("../models/Review");
 const bcrypt = require("bcryptjs");
 const udiseService = require("../utils/udiseService");
 const { createDefaultClasses } = require("../utils/createDefaultClasses");
+const { getRelativePath, getFileUrl, getFileUrls, convertDocumentsToUrls } = require("../utils/fileUrlHelper");
 
 // Register school (public). Expects multipart/form-data for file uploads.
 exports.registerSchool = async (req, res) => {
@@ -78,14 +79,20 @@ exports.registerSchool = async (req, res) => {
       role: "school_admin",
     });
 
-    // Save file paths (if provided)
+    // Save file paths (if provided) - convert absolute paths to relative paths
     const documents = {};
     if (files.registrationCertificate && files.registrationCertificate[0])
-      documents.registrationCertificate = files.registrationCertificate[0].path;
+      documents.registrationCertificate = getRelativePath(files.registrationCertificate[0].path);
     if (files.affiliationCertificate && files.affiliationCertificate[0])
-      documents.affiliationCertificate = files.affiliationCertificate[0].path;
+      documents.affiliationCertificate = getRelativePath(files.affiliationCertificate[0].path);
     if (files.principalIdProof && files.principalIdProof[0])
-      documents.principalIdProof = files.principalIdProof[0].path;
+      documents.principalIdProof = getRelativePath(files.principalIdProof[0].path);
+
+    // Save gallery images (if provided) - convert absolute paths to relative paths
+    const gallery = [];
+    if (files.gallery && Array.isArray(files.gallery)) {
+      gallery.push(...files.gallery.map((file) => getRelativePath(file.path)));
+    }
 
     // create school
     const school = await School.create({
@@ -113,6 +120,9 @@ exports.registerSchool = async (req, res) => {
         mobile: adminMobile,
       },
       documents,
+      listing: {
+        gallery: gallery, // Add gallery images to listing
+      },
       verificationStatus: "Pending",
       createdBy: user._id,
     });
@@ -122,7 +132,17 @@ exports.registerSchool = async (req, res) => {
     await createDefaultClasses(school._id);
     await user.save();
 
-    res.status(201).json({ message: "School registered successfully", school });
+    // Convert file paths to full URLs for response
+    const schoolResponse = {
+      ...school.toObject(),
+      documents: convertDocumentsToUrls(school.documents, req),
+      listing: school.listing ? {
+        ...school.listing.toObject(),
+        gallery: school.listing.gallery ? getFileUrls(school.listing.gallery, req) : [],
+      } : {},
+    };
+
+    res.status(201).json({ message: "School registered successfully", school: schoolResponse });
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Error registering school" });
@@ -165,10 +185,19 @@ exports.getSchoolWithReviews = async (req, res) => {
     // Get review summaries
     const reviewStats = await Review.getAverageRating(school._id);
 
+    // Convert file paths to full URLs
+    const schoolData = {
+      ...school,
+      listing: school.listing ? {
+        ...school.listing,
+        gallery: school.listing.gallery ? getFileUrls(school.listing.gallery, req) : [],
+      } : {},
+    };
+
     res.json({
       success: true,
       data: {
-        ...school,
+        ...schoolData,
         reviewStats: {
           averageRating: reviewStats.averageRating,
           totalReviews: reviewStats.totalReviews,
@@ -220,8 +249,17 @@ exports.getSchoolsWithReviews = async (req, res) => {
           return null;
         }
 
-        return {
+        // Convert file paths to full URLs
+        const schoolData = {
           ...school,
+          listing: school.listing ? {
+            ...school.listing,
+            gallery: school.listing.gallery ? getFileUrls(school.listing.gallery, req) : [],
+          } : {},
+        };
+
+        return {
+          ...schoolData,
           reviewStats: {
             averageRating: reviewStats.averageRating,
             totalReviews: reviewStats.totalReviews,
@@ -366,9 +404,18 @@ exports.getMySchool = async (req, res) => {
       });
     }
 
+    // Convert file paths to full URLs
+    const schoolData = {
+      ...school.toObject(),
+      listing: school.listing ? {
+        ...school.listing.toObject(),
+        gallery: school.listing.gallery ? getFileUrls(school.listing.gallery, req) : [],
+      } : {},
+    };
+
     res.status(200).json({
       success: true,
-      data: school,
+      data: schoolData,
     });
   } catch (error) {
     console.error("Error fetching school:", error.message);
@@ -395,11 +442,17 @@ exports.getSchoolListing = async (req, res) => {
       });
     }
 
+    // Convert file paths to full URLs
+    const listing = school.listing ? {
+      ...school.listing.toObject(),
+      gallery: school.listing.gallery ? getFileUrls(school.listing.gallery, req) : [],
+    } : {};
+
     res.status(200).json({
       success: true,
       data: {
         name: school.name,
-        listing: school.listing || {},
+        listing: listing,
         verificationStatus: school.verificationStatus,
       },
     });
@@ -503,7 +556,7 @@ exports.updateSchoolGallery = async (req, res) => {
     }
 
     // Add new images (max 10 total)
-    const newImages = galleryFiles.map((file) => file.path);
+    const newImages = galleryFiles.map((file) => getRelativePath(file.path));
     const totalImages = school.listing.gallery.length + newImages.length;
 
     if (totalImages > 10) {
@@ -517,9 +570,12 @@ exports.updateSchoolGallery = async (req, res) => {
 
     await school.save();
 
+    // Convert file paths to full URLs
+    const galleryUrls = getFileUrls(school.listing.gallery, req);
+
     res.status(200).json({
       success: true,
-      data: school.listing.gallery,
+      data: galleryUrls,
       message: "Gallery updated successfully",
     });
   } catch (error) {

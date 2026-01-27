@@ -42,6 +42,7 @@ router.post(
     { name: "registrationCertificate", maxCount: 1 },
     { name: "affiliationCertificate", maxCount: 1 },
     { name: "principalIdProof", maxCount: 1 },
+    { name: "gallery", maxCount: 10 }, // Gallery images (max 10)
   ]),
   registerSchool
 );

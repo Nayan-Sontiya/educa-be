@@ -67,7 +67,20 @@ exports.loginUser = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    const user = await User.findOne({ email });
+    // For backward compatibility, the frontend sends a single "email" field
+    // which can contain either an email address (for teachers/admins)
+    // or a username (for parents). We detect which one to use.
+    if (!email || !password) {
+      return res.status(400).json({ message: "Email/username and password are required" });
+    }
+
+    let user;
+    if (email.includes("@")) {
+      user = await User.findOne({ email });
+    } else {
+      user = await User.findOne({ username: email });
+    }
+
     if (!user) return res.status(400).json({ message: "Invalid credentials" });
 
     const match = await bcrypt.compare(password, user.password);

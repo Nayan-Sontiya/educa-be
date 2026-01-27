@@ -5,9 +5,17 @@ const {
   getUsers,
   assignSchool,
   updateUserRole,
+  getCurrentUser,
+  updateCurrentUser,
 } = require("../controllers/userController");
 const protect = require("../middleware/authMiddleware");
 const roleCheck = require("../middleware/roleMiddleware");
+
+// ✅ Get current user profile
+router.get("/me", protect, getCurrentUser);
+
+// ✅ Update current user profile
+router.put("/me", protect, updateCurrentUser);
 
 // ✅ Get all users (admin-only)
 router.get("/", protect, roleCheck(["admin"]), getUsers);

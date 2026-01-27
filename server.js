@@ -14,6 +14,8 @@ app.use(cors());
 app.use(morgan("dev"));
 
 // Serve uploaded files statically
+// Files can be accessed at: http://localhost:5000/uploads/filename.ext
+// Example: http://localhost:5000/uploads/1761501010261-277639906.png
 const path = require("path");
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 
@@ -29,6 +31,7 @@ app.use("/api/classes", require("./routes/classRoutes"));
 app.use("/api/sections", require("./routes/sectionRoutes"));
 app.use("/api/subjects", require("./routes/subjectRoutes"));
 app.use("/api/class-sections", require("./routes/classSectionRoutes"));
+app.use("/api/students", require("./routes/studentRoutes"));
 app.use(
   "/api/teacher-assignments",
   require("./routes/teacherAssignmentRoutes")
