@@ -6,17 +6,37 @@ const Teacher = require("../models/Teacher");
 
 exports.registerUser = async (req, res) => {
   try {
-    const { name, email, password, role, phone, schoolId } = req.body;
+    const { name, email, username, password, role, phone, schoolId } = req.body;
     
     // Validation
-    if (!name || !email || !password || !role) {
+    if (!name || !password || !role) {
       return res.status(400).json({ message: "Missing required fields" });
     }
 
-    // Check if user already exists
-    const exists = await User.findOne({ email });
-    if (exists) {
-      return res.status(400).json({ message: "User already exists" });
+    // For non-parent/student roles, email is required
+    if (role !== "parent" && role !== "student" && !email) {
+      return res.status(400).json({ message: "Email is required for this role" });
+    }
+
+    // For parent/student roles, username is required
+    if ((role === "parent" || role === "student") && !username) {
+      return res.status(400).json({ message: "Username is required for this role" });
+    }
+
+    // Check if user already exists by email (if email provided)
+    if (email) {
+      const existsByEmail = await User.findOne({ email });
+      if (existsByEmail) {
+        return res.status(409).json({ message: "A user with this email already exists" });
+      }
+    }
+
+    // Check if user already exists by username (if username provided)
+    if (username) {
+      const existsByUsername = await User.findOne({ username });
+      if (existsByUsername) {
+        return res.status(409).json({ message: "A user with this username already exists" });
+      }
     }
 
     // Hash password
@@ -25,10 +45,15 @@ exports.registerUser = async (req, res) => {
     // Create user
     const userData = {
       name,
-      email,
       password: hash,
       role,
     };
+
+    // Add email if provided (required for non-parent/student)
+    if (email) userData.email = email;
+    
+    // Add username if provided (required for parent/student)
+    if (username) userData.username = username;
 
     // Add optional fields
     if (phone) userData.phone = phone;
@@ -59,6 +84,38 @@ exports.registerUser = async (req, res) => {
     });
   } catch (error) {
     console.error("registerUser error:", error);
+    
+    // Handle MongoDB duplicate key error
+    if (error.code === 11000) {
+      const keyPattern = error.keyPattern || {};
+      const keyValue = error.keyValue || {};
+      
+      if (keyPattern.email && keyValue.email) {
+        return res.status(409).json({ 
+          message: `Email "${keyValue.email}" is already registered. Please use a different email.` 
+        });
+      }
+      
+      if (keyPattern.username && keyValue.username) {
+        return res.status(409).json({ 
+          message: `Username "${keyValue.username}" is already taken. Please choose a different username.` 
+        });
+      }
+      
+      return res.status(409).json({ 
+        message: "A user with this information already exists." 
+      });
+    }
+    
+    // Handle validation errors
+    if (error.name === 'ValidationError') {
+      const errors = Object.values(error.errors).map((err) => err.message);
+      return res.status(400).json({
+        message: "Validation error",
+        errors: errors,
+      });
+    }
+    
     res.status(500).json({ message: "Error registering user" });
   }
 };
@@ -110,6 +167,7 @@ exports.loginUser = async (req, res) => {
       id: user._id.toString(),
       name: user.name,
       email: user.email,
+      username: user.username,
       phone: user.phone,
       role: user.role,
     };
