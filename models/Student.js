@@ -8,6 +8,11 @@ const studentSchema = new mongoose.Schema(
       required: true,
       trim: true,
     },
+    studentIdentityId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "StudentIdentity",
+      index: true,
+    },
     rollNumber: {
       type: String,
       trim: true,

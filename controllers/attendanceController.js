@@ -39,8 +39,8 @@ exports.getAttendanceList = async (req, res) => {
       }
     }
 
-    // Get all students in this class section
-    const students = await Student.find({ classSectionId })
+    // Get all active students in this class section
+    const students = await Student.find({ classSectionId, status: "active" })
       .select("_id name rollNumber")
       .sort({ rollNumber: 1, name: 1 });
 

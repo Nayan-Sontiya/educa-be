@@ -4,8 +4,10 @@ const SchoolCalendarEvent = require("../models/SchoolCalendarEvent");
 const Student = require("../models/Student");
 const Attendance = require("../models/Attendance");
 const ClassSection = require("../models/ClassSection");
+const Teacher = require("../models/Teacher");
+const TeacherAssignment = require("../models/TeacherAssignment");
 
-// Get student calendar (for parent/student view)
+// Get student calendar (for parent, teacher, school_admin)
 exports.getStudentCalendar = async (req, res) => {
   try {
     const { studentId, startDate, endDate } = req.query;
@@ -14,13 +16,40 @@ exports.getStudentCalendar = async (req, res) => {
       return res.status(400).json({ message: "studentId is required" });
     }
 
-    // Verify access: parent can only see their own child's calendar
+    const student = await Student.findById(studentId);
+    if (!student) {
+      return res.status(404).json({ message: "Student not found" });
+    }
+
+    // Verify access
     if (req.user.role === "parent") {
-      const student = await Student.findById(studentId);
-      if (!student || student.parentUserId.toString() !== req.user.id) {
+      if (student.parentUserId.toString() !== req.user.id) {
         return res.status(403).json({
           message: "You are not allowed to view this student's calendar",
         });
+      }
+    } else if (req.user.role === "teacher" || req.user.role === "school_admin") {
+      if (req.user.schoolId && student.schoolId.toString() !== req.user.schoolId.toString()) {
+        return res.status(403).json({
+          message: "You are not allowed to view this student's calendar",
+        });
+      }
+      if (req.user.role === "teacher") {
+        const teacher = await Teacher.findOne({ userId: req.user.id });
+        if (!teacher) {
+          return res.status(403).json({ message: "Teacher profile not found" });
+        }
+        const assignment = await TeacherAssignment.findOne({
+          schoolId: student.schoolId,
+          teacherId: teacher._id,
+          classSectionId: student.classSectionId,
+          status: "active",
+        });
+        if (!assignment) {
+          return res.status(403).json({
+            message: "You are not assigned to this student's class",
+          });
+        }
       }
     }
 
@@ -30,20 +59,15 @@ exports.getStudentCalendar = async (req, res) => {
       calendar = await StudentCalendar.create({ studentId, entries: [] });
     }
 
-    // Get school calendar events for this student's school
-    const student = await Student.findById(studentId).populate("schoolId");
-    if (!student) {
-      return res.status(404).json({ message: "Student not found" });
-    }
-
     const start = startDate ? new Date(startDate) : new Date();
     start.setHours(0, 0, 0, 0);
     const end = endDate ? new Date(endDate) : new Date();
     end.setHours(23, 59, 59, 999);
 
     // Fetch school events that overlap with the date range
+    const schoolId = student.schoolId._id || student.schoolId;
     const schoolEvents = await SchoolCalendarEvent.find({
-      schoolId: student.schoolId._id,
+      schoolId,
       isActive: true,
       $or: [
         {
@@ -282,7 +306,7 @@ exports.deleteSchoolCalendarEvent = async (req, res) => {
 // Helper: Sync school event to all relevant student calendars
 async function syncSchoolEventToStudentCalendars(event) {
   try {
-    const query = { schoolId: event.schoolId };
+    const query = { schoolId: event.schoolId, status: "active" };
     if (!event.appliesToAllClasses && event.classIds.length > 0) {
       query.classId = { $in: event.classIds };
     }

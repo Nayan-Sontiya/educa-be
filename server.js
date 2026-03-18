@@ -42,6 +42,12 @@ app.use("/api/reviews", require("./routes/reviewRoutes"));
 app.use("/api/attendance", require("./routes/attendanceRoutes"));
 app.use("/api/calendar", require("./routes/calendarRoutes"));
 app.use("/api/parent-alerts", require("./routes/parentAlertRoutes"));
+app.use("/api/conversations", require("./routes/conversationRoutes"));
+app.use("/api/student-leaves", require("./routes/studentLeaveRoutes"));
+app.use("/api/teacher-attendance", require("./routes/teacherAttendanceRoutes"));
+
+// Cron jobs
+require("./cron/markTeachersAbsent");
 
 app.get("/", (req, res) => res.send("EduVerse API is running 🚀"));
 

@@ -4,7 +4,11 @@ const protect = require("../middleware/authMiddleware");
 const roleCheck = require("../middleware/roleMiddleware");
 const {
   addStudentToClass,
+  lookupLinkableStudents,
+  linkExistingStudentToClass,
   getStudentsForClassSection,
+  getStudentsForTeacher,
+  getStudentsBySchool,
   updateStudent,
   deleteStudent,
   getStudentPortfolio,
@@ -14,12 +18,43 @@ const {
   getMyChildren,
 } = require("../controllers/studentController");
 
+// Teacher: link flow (verify parent credentials -> choose student -> link)
+router.post(
+  "/link/lookup",
+  protect,
+  roleCheck(["teacher", "school_admin"]),
+  lookupLinkableStudents
+);
+
+router.post(
+  "/link",
+  protect,
+  roleCheck(["teacher", "school_admin"]),
+  linkExistingStudentToClass
+);
+
 // Teacher: add a student to a class section and create parent login
 router.post(
   "/",
   protect,
   roleCheck(["teacher", "school_admin"]),
   addStudentToClass
+);
+
+// School admin: get all active students in the school (with class and teacher)
+router.get(
+  "/by-school",
+  protect,
+  roleCheck(["school_admin"]),
+  getStudentsBySchool
+);
+
+// Teacher: get all students across assigned classes (optional ?search= for name)
+router.get(
+  "/for-teacher",
+  protect,
+  roleCheck(["teacher"]),
+  getStudentsForTeacher
 );
 
 // Teacher: get students for a class section

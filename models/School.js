@@ -79,6 +79,12 @@ const schoolSchema = new mongoose.Schema(
         address: String,
       },
     },
+    // Geofence for teacher attendance check-in
+    geofence: {
+      latitude: { type: Number },
+      longitude: { type: Number },
+      radiusMeters: { type: Number, default: 100 },
+    },
     createdBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   },
   { timestamps: true }

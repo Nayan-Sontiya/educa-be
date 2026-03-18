@@ -2,6 +2,11 @@ const mongoose = require("mongoose");
 
 const academicEntrySchema = new mongoose.Schema(
   {
+    schoolId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "School",
+      index: true,
+    },
     term: { type: String, trim: true }, // e.g. "Term 1 2025"
     subject: { type: String, required: true, trim: true },
     testName: { type: String, trim: true }, // e.g. "Unit Test 1"
@@ -16,6 +21,11 @@ const academicEntrySchema = new mongoose.Schema(
 
 const behaviorEntrySchema = new mongoose.Schema(
   {
+    schoolId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "School",
+      index: true,
+    },
     date: { type: Date, default: Date.now },
     discipline: { type: String, trim: true }, // e.g. "Excellent", "Needs Improvement"
     attendanceBehavior: { type: String, trim: true },
@@ -28,6 +38,11 @@ const behaviorEntrySchema = new mongoose.Schema(
 
 const skillEntrySchema = new mongoose.Schema(
   {
+    schoolId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "School",
+      index: true,
+    },
     area: {
       type: String,
       enum: [
@@ -52,14 +67,26 @@ const studentPortfolioSchema = new mongoose.Schema(
     studentId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Student",
-      required: true,
-      unique: true,
+      index: true,
+      sparse: true,
+    },
+    studentIdentityId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "StudentIdentity",
+      index: true,
+      sparse: true,
     },
     academic: [academicEntrySchema],
     behavior: [behaviorEntrySchema],
     skills: [skillEntrySchema],
   },
   { timestamps: true }
+);
+
+studentPortfolioSchema.index({ studentId: 1 }, { unique: true, sparse: true });
+studentPortfolioSchema.index(
+  { studentIdentityId: 1 },
+  { unique: true, sparse: true }
 );
 
 module.exports = mongoose.model("StudentPortfolio", studentPortfolioSchema);
