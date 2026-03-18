@@ -6,6 +6,7 @@ const bcrypt = require("bcryptjs");
 const udiseService = require("../utils/udiseService");
 const { createDefaultClasses } = require("../utils/createDefaultClasses");
 const { getRelativePath, getFileUrl, getFileUrls, convertDocumentsToUrls } = require("../utils/fileUrlHelper");
+const { normalizePhone } = require("../utils/phone");
 
 // Register school (public). Expects multipart/form-data for file uploads.
 exports.registerSchool = async (req, res) => {
@@ -72,11 +73,14 @@ exports.registerSchool = async (req, res) => {
         .json({ message: "Admin email already registered as user" });
 
     const hash = await bcrypt.hash(password, 10);
+    const pn = normalizePhone(adminMobile);
     const user = await User.create({
       name: adminName,
       email: adminEmail,
       password: hash,
       role: "school_admin",
+      phone: adminMobile,
+      ...(pn ? { phoneNormalized: pn } : {}),
     });
 
     // Save file paths (if provided) - convert absolute paths to relative paths

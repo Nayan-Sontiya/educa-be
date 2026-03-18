@@ -1,5 +1,6 @@
 // models/User.js
 const mongoose = require("mongoose");
+const { normalizePhone } = require("../utils/phone");
 
 const userSchema = new mongoose.Schema(
   {
@@ -48,6 +49,18 @@ const userSchema = new mongoose.Schema(
     },
     password: { type: String, required: true },
     phone: { type: String },
+    phoneNormalized: { type: String, sparse: true, index: true },
+    authOtp: {
+      code: String,
+      expiresAt: Date,
+      attempts: { type: Number, default: 3 },
+      purpose: { type: String, enum: ["forgot", "change"] },
+    },
+    /** After OTP, applied bcrypt hash for change-password flow */
+    pendingPasswordChange: {
+      newPasswordHash: String,
+      expiresAt: Date,
+    },
     role: {
       type: String,
       enum: ["admin", "teacher", "counselor", "school_admin", "parent", "student"],
@@ -81,6 +94,10 @@ userSchema.pre('save', function (next) {
   // Convert null to undefined for username
   if (this.username === null || this.username === '') {
     this.username = undefined;
+  }
+  if (this.isModified("phone")) {
+    const n = normalizePhone(this.phone);
+    this.phoneNormalized = n || undefined;
   }
   next();
 });

@@ -2,6 +2,7 @@
 const User = require("../models/User");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const { normalizePhone } = require("../utils/phone");
 const Teacher = require("../models/Teacher");
 
 exports.registerUser = async (req, res) => {
@@ -56,7 +57,11 @@ exports.registerUser = async (req, res) => {
     if (username) userData.username = username;
 
     // Add optional fields
-    if (phone) userData.phone = phone;
+    if (phone) {
+      userData.phone = phone;
+      const pn = normalizePhone(phone);
+      if (pn) userData.phoneNormalized = pn;
+    }
     if (schoolId) userData.schoolId = schoolId;
 
     const user = await User.create(userData);
