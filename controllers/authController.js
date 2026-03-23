@@ -78,7 +78,13 @@ exports.registerUser = async (req, res) => {
       id: user._id.toString(),
       name: user.name,
       email: user.email,
+      username: user.username,
       phone: user.phone,
+      gender: user.gender,
+      dateOfBirth: user.dateOfBirth,
+      address: user.address,
+      schoolId: user.schoolId,
+      createdAt: user.createdAt,
       role: user.role,
     };
 
@@ -174,6 +180,11 @@ exports.loginUser = async (req, res) => {
       email: user.email,
       username: user.username,
       phone: user.phone,
+      gender: user.gender,
+      dateOfBirth: user.dateOfBirth,
+      address: user.address,
+      schoolId: user.schoolId,
+      createdAt: user.createdAt,
       role: user.role,
     };
 

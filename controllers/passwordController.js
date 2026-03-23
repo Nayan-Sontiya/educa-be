@@ -8,9 +8,22 @@ const {
   clearOtp,
 } = require("../services/userOtpService");
 
+const OTP_TTL_MS = 5 * 60 * 1000;
+const MAX_RESEND = 3;
+
 const GENERIC_SEND_OTP = {
-  message: "If this number is registered, an OTP has been sent.",
+  message: "If this username is registered, an OTP has been sent.",
 };
+
+function generateCode() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+function maskPhone(phone) {
+  const n = normalizePhone(phone || "");
+  if (!n || n.length < 4) return "******";
+  return `******${n.slice(-4)}`;
+}
 
 function validatePasswordStrength(pw) {
   if (!pw || typeof pw !== "string")
@@ -54,24 +67,53 @@ async function findUserByMobile(mobile) {
   return null;
 }
 
+async function findUserByUsername(username) {
+  const uname = String(username || "").trim();
+  if (!uname) return null;
+  return User.findOne({ username: uname });
+}
+
 /** POST /api/auth/forgot-password/send-otp */
 exports.forgotPasswordSendOtp = async (req, res) => {
   try {
-    const { mobile } = req.body;
-    if (!mobile || normalizePhone(mobile).length < 8) {
-      return res
-        .status(400)
-        .json({ message: "Please enter a valid mobile number" });
+    const { username } = req.body;
+    if (!username || String(username).trim().length < 3) {
+      return res.status(400).json({ message: "Please enter a valid username" });
     }
 
-    const user = await findUserByMobile(mobile);
+    const user = await findUserByUsername(username);
     const pn = user ? normalizePhone(user.phone) : "";
     if (!user || !pn) {
       return res.json(GENERIC_SEND_OTP);
     }
 
-    await assignOtpToUser(user, "forgot");
+    const existing = user.authOtp;
+    const now = new Date();
+    const stillValidForgot =
+      existing &&
+      existing.purpose === "forgot" &&
+      existing.expiresAt &&
+      now <= new Date(existing.expiresAt);
+
+    const resendCount = stillValidForgot ? Number(existing.resendCount || 0) + 1 : 1;
+    if (resendCount > MAX_RESEND) {
+      return res.status(429).json({
+        message: "Maximum resend attempts reached. Please try again after OTP expiry.",
+      });
+    }
+
+    user.authOtp = {
+      code: generateCode(),
+      expiresAt: new Date(Date.now() + OTP_TTL_MS),
+      attempts: 3,
+      resendCount,
+      purpose: "forgot",
+    };
+    await user.save();
+
     const body = { ...GENERIC_SEND_OTP };
+    body.maskedMobile = maskPhone(user.phone);
+    body.message = `OTP sent to ${body.maskedMobile}`;
     if (process.env.NODE_ENV !== "production") {
       body.code = user.authOtp?.code;
       body.message = "OTP sent (dev). Use code to verify.";
@@ -86,15 +128,15 @@ exports.forgotPasswordSendOtp = async (req, res) => {
 /** POST /api/auth/forgot-password/verify-otp */
 exports.forgotPasswordVerifyOtp = async (req, res) => {
   try {
-    const { mobile, otp } = req.body;
-    if (!mobile || !otp) {
-      return res.status(400).json({ message: "Mobile and OTP are required" });
+    const { username, otp } = req.body;
+    if (!username || !otp) {
+      return res.status(400).json({ message: "Username and OTP are required" });
     }
     if (!/^[0-9]{6}$/.test(String(otp).trim())) {
       return res.status(400).json({ message: "OTP must be 6 digits" });
     }
 
-    const user = await findUserByMobile(mobile);
+    const user = await findUserByUsername(username);
     if (!user) {
       return res
         .status(400)

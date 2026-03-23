@@ -7,6 +7,8 @@ const {
   updateUserRole,
   getCurrentUser,
   updateCurrentUser,
+  requestContactChangeOtp,
+  verifyContactChangeOtp,
 } = require("../controllers/userController");
 const protect = require("../middleware/authMiddleware");
 const roleCheck = require("../middleware/roleMiddleware");
@@ -16,6 +18,8 @@ router.get("/me", protect, getCurrentUser);
 
 // ✅ Update current user profile
 router.put("/me", protect, updateCurrentUser);
+router.post("/me/contact-change/request-otp", protect, requestContactChangeOtp);
+router.post("/me/contact-change/verify-otp", protect, verifyContactChangeOtp);
 
 // ✅ Get all users (admin-only)
 router.get("/", protect, roleCheck(["admin"]), getUsers);

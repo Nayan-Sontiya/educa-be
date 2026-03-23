@@ -50,10 +50,32 @@ const userSchema = new mongoose.Schema(
     password: { type: String, required: true },
     phone: { type: String },
     phoneNormalized: { type: String, sparse: true, index: true },
+    gender: {
+      type: String,
+      enum: ["male", "female", "other", "prefer_not_to_say"],
+    },
+    dateOfBirth: { type: Date },
+    address: { type: String },
+    pendingContactChange: {
+      email: {
+        value: String,
+        code: String,
+        expiresAt: Date,
+        verified: { type: Boolean, default: false },
+      },
+      phone: {
+        value: String,
+        normalized: String,
+        code: String,
+        expiresAt: Date,
+        verified: { type: Boolean, default: false },
+      },
+    },
     authOtp: {
       code: String,
       expiresAt: Date,
       attempts: { type: Number, default: 3 },
+      resendCount: { type: Number, default: 0 },
       purpose: { type: String, enum: ["forgot", "change"] },
     },
     /** After OTP, applied bcrypt hash for change-password flow */
