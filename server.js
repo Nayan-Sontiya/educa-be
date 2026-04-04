@@ -9,7 +9,8 @@ dotenv.config();
 const app = express();
 
 // Middlewares
-app.use(express.json());
+// Large limit: academic evidence can be sent as JSON base64 from Expo (multipart is unreliable on RN)
+app.use(express.json({ limit: "30mb" }));
 app.use(cors());
 app.use(morgan("dev"));
 
@@ -18,6 +19,8 @@ app.use(morgan("dev"));
 // Example: http://localhost:5000/uploads/1761501010261-277639906.png
 const path = require("path");
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
+// Brand assets (e.g. logo in transactional emails when API_PUBLIC_URL is set)
+app.use("/brand", express.static(path.join(__dirname, "assets", "brand")));
 
 // DB Connection
 connectDB();

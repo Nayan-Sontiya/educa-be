@@ -1,4 +1,5 @@
 const express = require("express");
+const multer = require("multer");
 const router = express.Router();
 const protect = require("../middleware/authMiddleware");
 const roleCheck = require("../middleware/roleMiddleware");
@@ -15,73 +16,37 @@ const {
   addAcademicRecord,
   addBehaviorRecord,
   addSkillRecord,
+  addWellbeingRecord,
+  getAIAnalysis,
   getMyChildren,
 } = require("../controllers/studentController");
 
-// Teacher: link flow (verify parent credentials -> choose student -> link)
-router.post(
-  "/link/lookup",
-  protect,
-  roleCheck(["teacher", "school_admin"]),
-  lookupLinkableStudents
-);
+// Multer: memory storage for Cloudinary upload (max 5 files, 10 MB each)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype.startsWith("image/") || file.mimetype === "application/pdf") {
+      cb(null, true);
+    } else {
+      cb(new Error("Only image and PDF files are allowed"), false);
+    }
+  },
+});
 
-router.post(
-  "/link",
-  protect,
-  roleCheck(["teacher", "school_admin"]),
-  linkExistingStudentToClass
-);
+// ─── Link flow ────────────────────────────────────────────────────────────────
+router.post("/link/lookup", protect, roleCheck(["teacher", "school_admin"]), lookupLinkableStudents);
+router.post("/link", protect, roleCheck(["teacher", "school_admin"]), linkExistingStudentToClass);
 
-// Teacher: add a student to a class section and create parent login
-router.post(
-  "/",
-  protect,
-  roleCheck(["teacher", "school_admin"]),
-  addStudentToClass
-);
+// ─── Student CRUD ─────────────────────────────────────────────────────────────
+router.post("/", protect, roleCheck(["teacher", "school_admin"]), addStudentToClass);
+router.get("/by-school", protect, roleCheck(["school_admin"]), getStudentsBySchool);
+router.get("/for-teacher", protect, roleCheck(["teacher"]), getStudentsForTeacher);
+router.get("/", protect, roleCheck(["teacher", "school_admin"]), getStudentsForClassSection);
+router.put("/:id", protect, roleCheck(["teacher", "school_admin"]), updateStudent);
+router.delete("/:id", protect, roleCheck(["teacher", "school_admin"]), deleteStudent);
 
-// School admin: get all active students in the school (with class and teacher)
-router.get(
-  "/by-school",
-  protect,
-  roleCheck(["school_admin"]),
-  getStudentsBySchool
-);
-
-// Teacher: get all students across assigned classes (optional ?search= for name)
-router.get(
-  "/for-teacher",
-  protect,
-  roleCheck(["teacher"]),
-  getStudentsForTeacher
-);
-
-// Teacher: get students for a class section
-router.get(
-  "/",
-  protect,
-  roleCheck(["teacher", "school_admin"]),
-  getStudentsForClassSection
-);
-
-// Teacher: update a student
-router.put(
-  "/:id",
-  protect,
-  roleCheck(["teacher", "school_admin"]),
-  updateStudent
-);
-
-// Teacher: delete a student
-router.delete(
-  "/:id",
-  protect,
-  roleCheck(["teacher", "school_admin"]),
-  deleteStudent
-);
-
-// Portfolio endpoints
+// ─── Portfolio ────────────────────────────────────────────────────────────────
 router.get(
   "/:id/portfolio",
   protect,
@@ -89,10 +54,20 @@ router.get(
   getStudentPortfolio
 );
 
+// Academic — JSON body is parsed by global express.json (30mb). Multipart uses multer only.
+function academicMultipartIfNeeded(req, res, next) {
+  const ct = (req.headers["content-type"] || "").toLowerCase();
+  if (ct.includes("multipart/form-data")) {
+    return upload.array("evidenceFiles", 5)(req, res, next);
+  }
+  return next();
+}
+
 router.post(
   "/:id/portfolio/academic",
   protect,
   roleCheck(["teacher", "school_admin"]),
+  academicMultipartIfNeeded,
   addAcademicRecord
 );
 
@@ -110,13 +85,22 @@ router.post(
   addSkillRecord
 );
 
-// Parent: list their own children
-router.get(
-  "/my-children",
+router.post(
+  "/:id/portfolio/wellbeing",
   protect,
-  roleCheck(["parent"]),
-  getMyChildren
+  roleCheck(["teacher", "school_admin"]),
+  addWellbeingRecord
 );
 
-module.exports = router;
+// AI Analysis
+router.get(
+  "/:id/portfolio/analysis",
+  protect,
+  roleCheck(["teacher", "school_admin", "parent"]),
+  getAIAnalysis
+);
 
+// ─── Parent ───────────────────────────────────────────────────────────────────
+router.get("/my-children", protect, roleCheck(["parent"]), getMyChildren);
+
+module.exports = router;

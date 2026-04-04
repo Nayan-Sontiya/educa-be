@@ -1,12 +1,19 @@
 // controllers/schoolController.js
 const School = require("../models/School");
 const User = require("../models/User");
+const Teacher = require("../models/Teacher");
+const Student = require("../models/Student");
+const Class = require("../models/Class");
 const Review = require("../models/Review");
 const bcrypt = require("bcryptjs");
 const udiseService = require("../utils/udiseService");
 const { createDefaultClasses } = require("../utils/createDefaultClasses");
 const { getRelativePath, getFileUrl, getFileUrls, convertDocumentsToUrls } = require("../utils/fileUrlHelper");
 const { normalizePhone } = require("../utils/phone");
+const {
+  notifySchoolRegistered,
+  notifySchoolStatusChanged,
+} = require("../utils/schoolEmailNotifications");
 
 // Register school (public). Expects multipart/form-data for file uploads.
 exports.registerSchool = async (req, res) => {
@@ -147,18 +154,247 @@ exports.registerSchool = async (req, res) => {
     };
 
     res.status(201).json({ message: "School registered successfully", school: schoolResponse });
+
+    notifySchoolRegistered({
+      school: school.toObject ? school.toObject() : school,
+      adminName: user.name,
+    })
+      .then((result) => {
+        if (result?.sent) {
+          console.log("[mail] school registration — SENT", {
+            to: school.email,
+            messageId: result.messageId,
+          });
+        } else if (result?.skipped) {
+          console.log("[mail] school registration — SKIPPED", {
+            to: school.email,
+            reason: result.reason,
+          });
+        } else if (result?.error) {
+          console.error("[mail] school registration — FAILED", {
+            error: result.error.message,
+          });
+        }
+      })
+      .catch((err) =>
+        console.error("[mail] school registration — exception:", err)
+      );
   } catch (error) {
     console.error(error);
     res.status(500).json({ message: "Error registering school" });
   }
 };
 
-exports.getSchools = async (req, res) => {
+const ALLOWED_VERIFICATION_STATUSES = [
+  "Pending",
+  "Verified",
+  "Rejected",
+  "Blocked",
+  "Suspended",
+  "NeedMoreInfo",
+];
+
+/** Public: verified schools only (e.g. teacher signup, mobile app) */
+exports.getSchoolsVerifiedPublic = async (req, res) => {
   try {
-    const schools = await School.find().populate("createdBy", "name email");
+    const schools = await School.find({ verificationStatus: "Verified" })
+      .select("name city state email phone verificationStatus udiseCode")
+      .sort({ name: 1 })
+      .lean();
     res.json(schools);
   } catch (error) {
+    console.error("getSchoolsVerifiedPublic:", error);
     res.status(500).json({ message: "Error fetching schools" });
+  }
+};
+
+/** Platform admin: list all schools (optionally filter by verificationStatus) */
+exports.getSchoolsForAdmin = async (req, res) => {
+  try {
+    const { status } = req.query;
+    const q = {};
+    if (status && ALLOWED_VERIFICATION_STATUSES.includes(status)) {
+      q.verificationStatus = status;
+    }
+    const schools = await School.find(q)
+      .populate("createdBy", "name email phone role")
+      .sort({ createdAt: -1 })
+      .lean();
+    res.json({
+      success: true,
+      data: schools,
+      count: schools.length,
+    });
+  } catch (error) {
+    console.error("getSchoolsForAdmin:", error);
+    res.status(500).json({ success: false, message: "Error fetching schools" });
+  }
+};
+
+/** Platform admin: dashboard aggregates */
+exports.getPlatformSchoolStats = async (req, res) => {
+  try {
+    const [
+      totalSchools,
+      pendingSchools,
+      verifiedSchools,
+      rejectedSchools,
+      blockedSchools,
+      suspendedSchools,
+      needMoreInfoSchools,
+      totalTeachers,
+      totalStudents,
+    ] = await Promise.all([
+      School.countDocuments(),
+      School.countDocuments({ verificationStatus: "Pending" }),
+      School.countDocuments({ verificationStatus: "Verified" }),
+      School.countDocuments({ verificationStatus: "Rejected" }),
+      School.countDocuments({ verificationStatus: "Blocked" }),
+      School.countDocuments({ verificationStatus: "Suspended" }),
+      School.countDocuments({ verificationStatus: "NeedMoreInfo" }),
+      Teacher.countDocuments(),
+      Student.countDocuments(),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        totalSchools,
+        pendingApproval: pendingSchools,
+        activeSchools: verifiedSchools,
+        rejectedSchools,
+        blockedSchools,
+        suspendedSchools,
+        needMoreInfoSchools,
+        totalTeachers,
+        totalStudents,
+      },
+    });
+  } catch (error) {
+    console.error("getPlatformSchoolStats:", error);
+    res.status(500).json({ success: false, message: "Error fetching stats" });
+  }
+};
+
+/** Platform admin: per-school counts */
+exports.getSchoolAdminSummary = async (req, res) => {
+  try {
+    const { schoolId } = req.params;
+    const school = await School.findById(schoolId)
+      .populate("createdBy", "name email phone")
+      .lean();
+    if (!school) {
+      return res.status(404).json({ success: false, message: "School not found" });
+    }
+    const sid = school._id;
+    const [teacherCount, studentCount, classCount] = await Promise.all([
+      Teacher.countDocuments({ schoolId: sid }),
+      Student.countDocuments({ schoolId: sid }),
+      Class.countDocuments({ schoolId: sid }),
+    ]);
+    res.json({
+      success: true,
+      data: {
+        school,
+        counts: {
+          teachers: teacherCount,
+          students: studentCount,
+          classes: classCount,
+        },
+      },
+    });
+  } catch (error) {
+    console.error("getSchoolAdminSummary:", error);
+    res.status(500).json({ success: false, message: "Error fetching summary" });
+  }
+};
+
+const PLATFORM_SCHOOL_LIST_LIMIT = 150;
+
+/** Platform admin: school profile + roster previews (teachers, students, classes) */
+exports.getPlatformSchoolDetail = async (req, res) => {
+  try {
+    const { schoolId } = req.params;
+    const schoolRaw = await School.findById(schoolId)
+      .populate("createdBy", "name email phone role username")
+      .lean();
+    if (!schoolRaw) {
+      return res.status(404).json({ success: false, message: "School not found" });
+    }
+
+    const { otp: _otp, ...restSchool } = schoolRaw;
+    const school = {
+      ...restSchool,
+      documents: convertDocumentsToUrls(schoolRaw.documents || {}, req),
+      listing: schoolRaw.listing
+        ? {
+            ...schoolRaw.listing,
+            gallery: getFileUrls(schoolRaw.listing.gallery || [], req),
+          }
+        : schoolRaw.listing,
+    };
+
+    const sid = school._id;
+    const [
+      teacherCount,
+      studentCount,
+      classCount,
+      teachers,
+      students,
+      classes,
+    ] = await Promise.all([
+      Teacher.countDocuments({ schoolId: sid }),
+      Student.countDocuments({ schoolId: sid }),
+      Class.countDocuments({ schoolId: sid }),
+      Teacher.find({ schoolId: sid })
+        .populate("userId", "name email phone username role")
+        .select("userId phone status createdAt")
+        .sort({ createdAt: -1 })
+        .limit(PLATFORM_SCHOOL_LIST_LIMIT)
+        .lean(),
+      Student.find({ schoolId: sid })
+        .select("name rollNumber gender status admissionDate classSectionId createdAt")
+        .populate({
+          path: "classSectionId",
+          select: "classId sectionId",
+          populate: [
+            { path: "classId", select: "name" },
+            { path: "sectionId", select: "name" },
+          ],
+        })
+        .sort({ createdAt: -1 })
+        .limit(PLATFORM_SCHOOL_LIST_LIMIT)
+        .lean(),
+      Class.find({ schoolId: sid })
+        .select("name order status createdAt")
+        .sort({ order: 1 })
+        .limit(PLATFORM_SCHOOL_LIST_LIMIT)
+        .lean(),
+    ]);
+
+    res.json({
+      success: true,
+      data: {
+        school,
+        counts: {
+          teachers: teacherCount,
+          students: studentCount,
+          classes: classCount,
+        },
+        listLimits: {
+          maxPerSection: PLATFORM_SCHOOL_LIST_LIMIT,
+          teachersReturned: teachers.length,
+          studentsReturned: students.length,
+          classesReturned: classes.length,
+        },
+        teachers,
+        students,
+        classes,
+      },
+    });
+  } catch (error) {
+    console.error("getPlatformSchoolDetail:", error);
+    res.status(500).json({ success: false, message: "Error fetching school detail" });
   }
 };
 
@@ -328,21 +564,86 @@ exports.verifyOtp = async (req, res) => {
   }
 };
 
-// Admin review endpoint to update verification status
+// Platform admin: update verification / approval workflow
 exports.updateVerification = async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body; // Expected: Verified or Rejected
-    if (!["Verified", "Rejected", "Pending"].includes(status))
+    const { status, rejectionReason, reviewNote } = req.body;
+    if (!ALLOWED_VERIFICATION_STATUSES.includes(status)) {
       return res.status(400).json({ message: "Invalid status" });
+    }
 
     const school = await School.findById(id);
     if (!school) return res.status(404).json({ message: "School not found" });
 
+    const previousStatus = school.verificationStatus;
+
     school.verificationStatus = status;
+    if (status === "Rejected") {
+      if (rejectionReason !== undefined) {
+        school.rejectionReason = rejectionReason
+          ? String(rejectionReason).trim()
+          : undefined;
+      }
+      school.reviewNote = undefined;
+    } else if (status === "NeedMoreInfo") {
+      if (reviewNote !== undefined) {
+        school.reviewNote = reviewNote ? String(reviewNote).trim() : undefined;
+      }
+      school.rejectionReason = undefined;
+    } else {
+      school.rejectionReason = undefined;
+      school.reviewNote = undefined;
+    }
     await school.save();
-    res.json({ message: "School verification updated", school });
+    res.json({
+      success: true,
+      message: "School status updated",
+      data: school,
+    });
+
+    // Email on every successful PATCH (even if status value unchanged — e.g. re-save / repeat apply)
+    console.log("[mail] verification PATCH — notify queued", {
+      schoolId: String(school._id),
+      previousStatus,
+      newStatus: status,
+      statusUnchanged: previousStatus === status,
+      recipient: school.email || null,
+    });
+
+    notifySchoolStatusChanged({
+      school: school.toObject(),
+      previousStatus,
+      newStatus: status,
+      rejectionReason:
+        status === "Rejected" ? school.rejectionReason : undefined,
+      reviewNote: status === "NeedMoreInfo" ? school.reviewNote : undefined,
+    })
+      .then((result) => {
+        if (result?.sent) {
+          console.log("[mail] verification PATCH — notify SENT", {
+            schoolId: String(school._id),
+            to: school.email,
+            messageId: result.messageId,
+          });
+        } else if (result?.skipped) {
+          console.log("[mail] verification PATCH — notify SKIPPED", {
+            schoolId: String(school._id),
+            to: school.email,
+            reason: result.reason,
+          });
+        } else if (result?.error) {
+          console.error("[mail] verification PATCH — notify FAILED", {
+            schoolId: String(school._id),
+            error: result.error.message,
+          });
+        }
+      })
+      .catch((err) =>
+        console.error("[mail] verification PATCH — notify exception:", err)
+      );
   } catch (err) {
+    console.error("updateVerification:", err);
     res.status(500).json({ message: "Error updating verification" });
   }
 };

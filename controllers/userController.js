@@ -1,6 +1,22 @@
 // controllers/userController.js
+const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
 const User = require("../models/User");
 const { normalizePhone } = require("../utils/phone");
+
+const ROLE_ENUM = ["admin", "teacher", "counselor", "school_admin", "parent", "student"];
+
+async function countActiveAdmins(excludeUserId) {
+  const q = { role: "admin", isBlocked: { $ne: true } };
+  if (excludeUserId) {
+    q._id = { $ne: excludeUserId };
+  }
+  return User.countDocuments(q);
+}
+
+function isValidObjectId(id) {
+  return mongoose.Types.ObjectId.isValid(id) && String(new mongoose.Types.ObjectId(id)) === id;
+}
 
 const CONTACT_OTP_TTL_MS = 5 * 60 * 1000;
 
@@ -253,10 +269,49 @@ exports.verifyContactChangeOtp = async (req, res) => {
 
 exports.getUsers = async (req, res) => {
   try {
-    const users = await User.find().populate("schoolId", "name");
-    res.json(users);
+    const page = Math.max(1, parseInt(String(req.query.page || "1"), 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit || "50"), 10) || 50));
+    const skip = (page - 1) * limit;
+
+    const q = {};
+    if (req.query.role && ROLE_ENUM.includes(req.query.role)) {
+      q.role = req.query.role;
+    }
+    if (req.query.schoolId && isValidObjectId(req.query.schoolId)) {
+      q.schoolId = req.query.schoolId;
+    }
+    if (req.query.blocked === "true") {
+      q.isBlocked = true;
+    } else if (req.query.blocked === "false") {
+      q.isBlocked = { $in: [false, null] };
+    }
+    const search = String(req.query.search || "").trim();
+    if (search) {
+      const rx = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+      q.$or = [{ name: rx }, { email: rx }, { username: rx }, { phone: rx }];
+    }
+
+    const [users, total] = await Promise.all([
+      User.find(q)
+        .select("-password")
+        .populate("schoolId", "name verificationStatus")
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit),
+      User.countDocuments(q),
+    ]);
+
+    res.status(200).json({
+      success: true,
+      data: users,
+      count: users.length,
+      total,
+      page,
+      limit,
+      message: "Users retrieved successfully",
+    });
   } catch (error) {
-    res.status(500).json({ message: "Error fetching users" });
+    res.status(500).json({ success: false, message: "Error fetching users" });
   }
 };
 
@@ -278,14 +333,256 @@ exports.assignSchool = async (req, res) => {
 exports.updateUserRole = async (req, res) => {
   try {
     const { role } = req.body;
+    if (!ROLE_ENUM.includes(role)) {
+      return res.status(400).json({ success: false, message: "Invalid role" });
+    }
+    const target = await User.findById(req.params.id);
+    if (!target) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+    const err = await assertCanChangeAdminRole(target, role);
+    if (err) {
+      return res.status(400).json({ success: false, message: err });
+    }
     const user = await User.findByIdAndUpdate(
       req.params.id,
       { role },
-      { new: true }
-    );
-    if (!user) return res.status(404).json({ message: "User not found" });
-    res.json({ message: "Role updated successfully", user });
+      { new: true, runValidators: true }
+    )
+      .select("-password")
+      .populate("schoolId", "name verificationStatus");
+    res.status(200).json({
+      success: true,
+      data: user,
+      message: "Role updated successfully",
+    });
   } catch (error) {
-    res.status(500).json({ message: "Error updating role" });
+    res.status(500).json({ success: false, message: "Error updating role" });
+  }
+};
+
+async function assertCanChangeAdminRole(targetUser, newRole) {
+  if (targetUser.role !== "admin" || targetUser.isBlocked === true) {
+    return null;
+  }
+  if (newRole === "admin") return null;
+  const others = await countActiveAdmins(targetUser._id);
+  if (others < 1) {
+    return "Cannot change role of the last active platform admin";
+  }
+  return null;
+}
+
+async function assertCanStripAdminOrBlock(targetUser, patch) {
+  if (targetUser.role !== "admin" || targetUser.isBlocked === true) {
+    return null;
+  }
+  const becomesNonAdmin = patch.role && patch.role !== "admin";
+  const becomesBlocked = patch.isBlocked === true;
+  if (!becomesNonAdmin && !becomesBlocked) return null;
+  const others = await countActiveAdmins(targetUser._id);
+  if (others < 1) {
+    return "Cannot remove or block the last active platform admin";
+  }
+  return null;
+}
+
+exports.getUserById = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid user id" });
+    }
+    const user = await User.findById(req.params.id)
+      .select("-password")
+      .populate("schoolId", "name verificationStatus");
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+    res.status(200).json({
+      success: true,
+      data: user,
+      message: "User retrieved successfully",
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Error fetching user" });
+  }
+};
+
+exports.adminPatchUser = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid user id" });
+    }
+    const target = await User.findById(req.params.id);
+    if (!target) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+
+    const {
+      name,
+      email,
+      username,
+      phone,
+      role,
+      schoolId,
+      isBlocked,
+    } = req.body;
+
+    const patch = {};
+    if (name !== undefined) patch.name = String(name).trim();
+    if (email !== undefined) {
+      const e = String(email || "").trim().toLowerCase();
+      if (e && !validateEmail(e)) {
+        return res.status(400).json({ success: false, message: "Invalid email" });
+      }
+      patch.email = e || undefined;
+    }
+    if (username !== undefined) {
+      const u = String(username || "").trim();
+      patch.username = u || undefined;
+    }
+    if (phone !== undefined) {
+      patch.phone = String(phone || "").trim() || undefined;
+    }
+    if (role !== undefined) {
+      if (!ROLE_ENUM.includes(role)) {
+        return res.status(400).json({ success: false, message: "Invalid role" });
+      }
+      patch.role = role;
+    }
+    if (schoolId !== undefined) {
+      if (schoolId === null || schoolId === "") {
+        patch.schoolId = undefined;
+      } else if (!isValidObjectId(String(schoolId))) {
+        return res.status(400).json({ success: false, message: "Invalid school id" });
+      } else {
+        patch.schoolId = schoolId;
+      }
+    }
+    if (isBlocked !== undefined) {
+      patch.isBlocked = Boolean(isBlocked);
+    }
+
+    const guard = await assertCanStripAdminOrBlock(target, patch);
+    if (guard) {
+      return res.status(400).json({ success: false, message: guard });
+    }
+
+    if (String(req.user.id) === String(target._id) && patch.isBlocked === true) {
+      return res.status(400).json({ success: false, message: "You cannot block your own account" });
+    }
+
+    if (patch.email) {
+      const taken = await User.findOne({
+        email: patch.email,
+        _id: { $ne: target._id },
+      });
+      if (taken) {
+        return res.status(409).json({ success: false, message: "Email already in use" });
+      }
+    }
+    if (patch.username) {
+      const taken = await User.findOne({
+        username: patch.username,
+        _id: { $ne: target._id },
+      });
+      if (taken) {
+        return res.status(409).json({ success: false, message: "Username already in use" });
+      }
+    }
+
+    Object.assign(target, patch);
+    if (target.isModified("phone")) {
+      const n = normalizePhone(target.phone);
+      target.phoneNormalized = n || undefined;
+    }
+
+    await target.save();
+    const fresh = await User.findById(target._id)
+      .select("-password")
+      .populate("schoolId", "name verificationStatus");
+
+    res.status(200).json({
+      success: true,
+      data: fresh,
+      message: "User updated successfully",
+    });
+  } catch (error) {
+    if (error.name === "ValidationError") {
+      return res.status(400).json({
+        success: false,
+        message: Object.values(error.errors)
+          .map((e) => e.message)
+          .join(", "),
+      });
+    }
+    if (error.code === 11000) {
+      return res.status(409).json({
+        success: false,
+        message: "Duplicate email or username",
+      });
+    }
+    res.status(500).json({ success: false, message: "Error updating user" });
+  }
+};
+
+exports.adminDeleteUser = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid user id" });
+    }
+    if (String(req.user.id) === String(req.params.id)) {
+      return res.status(400).json({ success: false, message: "You cannot delete your own account" });
+    }
+    const target = await User.findById(req.params.id);
+    if (!target) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+    if (target.role === "admin" && target.isBlocked !== true) {
+      const others = await countActiveAdmins(target._id);
+      if (others < 1) {
+        return res.status(400).json({
+          success: false,
+          message: "Cannot delete the last active platform admin",
+        });
+      }
+    }
+    await User.findByIdAndDelete(req.params.id);
+    res.status(200).json({
+      success: true,
+      message: "User deleted successfully",
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Error deleting user" });
+  }
+};
+
+exports.adminResetPassword = async (req, res) => {
+  try {
+    if (!isValidObjectId(req.params.id)) {
+      return res.status(400).json({ success: false, message: "Invalid user id" });
+    }
+    const { newPassword } = req.body;
+    if (!newPassword || String(newPassword).length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: "newPassword is required (min 6 characters)",
+      });
+    }
+    const target = await User.findById(req.params.id);
+    if (!target) {
+      return res.status(404).json({ success: false, message: "User not found" });
+    }
+    const hash = await bcrypt.hash(String(newPassword), 10);
+    target.password = hash;
+    target.authOtp = undefined;
+    target.pendingPasswordChange = undefined;
+    await target.save();
+    res.status(200).json({
+      success: true,
+      message: "Password reset successfully. Ask the user to sign in with the new password.",
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: "Error resetting password" });
   }
 };

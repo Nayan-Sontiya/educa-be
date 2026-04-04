@@ -9,6 +9,12 @@ const TeacherAssignment = require("../models/TeacherAssignment");
 const StudentPortfolio = require("../models/StudentPortfolio");
 const School = require("../models/School");
 const { sendSms } = require("../utils/smsService");
+const { uploadBuffer } = require("../utils/cloudinary");
+const { analyzePortfolio, getWeekNumber } = require("../utils/aiAnalysis");
+const {
+  resolvePortfolioForStudent,
+  portfolioEntryCount,
+} = require("../utils/studentPortfolioResolve");
 
 const escapeRegex = (value = "") =>
   value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -723,37 +729,27 @@ exports.getStudentPortfolio = async (req, res) => {
 
     const studentIdentityId = await ensureStudentIdentityForStudent(student);
 
-    let portfolio =
-      (await StudentPortfolio.findOne({ studentIdentityId })) ||
-      (await StudentPortfolio.findOne({ studentId: student._id }));
-    if (!portfolio) {
-      portfolio = await StudentPortfolio.create({
-        studentId: student._id,
-        studentIdentityId,
-      });
-    } else {
-      let shouldSave = false;
-      if (!portfolio.studentIdentityId) {
-        portfolio.studentIdentityId = studentIdentityId;
-        shouldSave = true;
-      }
-      if (!portfolio.studentId) {
-        portfolio.studentId = student._id;
-        shouldSave = true;
-      }
+    const portfolio = await resolvePortfolioForStudent(student, studentIdentityId);
 
-      // Backfill institution tag on older entries (best-effort).
-      const changed = applyDefaultSchoolIdToEntries(portfolio, student.schoolId);
-      if (changed) shouldSave = true;
-
-      if (shouldSave) await portfolio.save();
+    let shouldSave = false;
+    if (!portfolio.studentIdentityId) {
+      portfolio.studentIdentityId = studentIdentityId;
+      shouldSave = true;
     }
+    if (!portfolio.studentId) {
+      portfolio.studentId = student._id;
+      shouldSave = true;
+    }
+    const changed = applyDefaultSchoolIdToEntries(portfolio, student.schoolId);
+    if (changed) shouldSave = true;
+    if (shouldSave) await portfolio.save();
 
     const allSchoolIds = [
       student.schoolId?.toString(),
       ...(portfolio.academic || []).map((e) => e.schoolId?.toString()),
       ...(portfolio.behavior || []).map((e) => e.schoolId?.toString()),
       ...(portfolio.skills || []).map((e) => e.schoolId?.toString()),
+      ...(portfolio.wellbeing || []).map((e) => e.schoolId?.toString()),
     ].filter(Boolean);
 
     const schoolsById = await loadSchoolsById(allSchoolIds);
@@ -783,6 +779,7 @@ exports.getStudentPortfolio = async (req, res) => {
         academic: (portfolioObj.academic || []).map(withInstitutionTag),
         behavior: (portfolioObj.behavior || []).map(withInstitutionTag),
         skills: (portfolioObj.skills || []).map(withInstitutionTag),
+        wellbeing: (portfolioObj.wellbeing || []).map(withInstitutionTag),
       },
       meta: {
         currentSchoolId,
@@ -799,51 +796,110 @@ exports.getStudentPortfolio = async (req, res) => {
 exports.addAcademicRecord = async (req, res) => {
   try {
     const { id } = req.params;
-    const { term, subject, testName, marksObtained, maxMarks, grade, remarks, date } =
-      req.body;
-
-    if (!subject) {
-      return res.status(400).json({ message: "Subject is required" });
-    }
-
-    const { error, student } = await ensureTeacherOrAdminCanAccessStudent(
-      req,
-      id
-    );
-    if (error) {
-      return res.status(error.status).json({ message: error.message });
-    }
-
-    const studentIdentityId = await ensureStudentIdentityForStudent(student);
-
-    let portfolio =
-      (await StudentPortfolio.findOne({ studentIdentityId })) ||
-      (await StudentPortfolio.findOne({ studentId: student._id }));
-    if (!portfolio) {
-      portfolio = await StudentPortfolio.create({
-        studentId: student._id,
-        studentIdentityId,
-      });
-    }
-
-    portfolio.academic.push({
-      schoolId: student.schoolId,
+    const {
       term,
       subject,
+      assessmentType,
       testName,
       marksObtained,
       maxMarks,
       grade,
       remarks,
       date,
+      evidenceFilesB64,
+    } = req.body;
+
+    if (!subject) {
+      return res.status(400).json({ message: "Subject is required" });
+    }
+
+    const { error, student } = await ensureTeacherOrAdminCanAccessStudent(req, id);
+    if (error) return res.status(error.status).json({ message: error.message });
+
+    const studentIdentityId = await ensureStudentIdentityForStudent(student);
+
+    const portfolio = await resolvePortfolioForStudent(student, studentIdentityId);
+
+    // Upload evidence: multipart (multer) and/or JSON base64 (Expo — reliable on RN)
+    const evidenceFiles = [];
+    const hadMultipart = req.files && req.files.length > 0;
+    const b64List = Array.isArray(evidenceFilesB64) ? evidenceFilesB64 : [];
+
+    if (hadMultipart) {
+      for (const file of req.files) {
+        try {
+          const result = await uploadBuffer(file.buffer, {
+            folder: `educa/evidence/${student._id}`,
+            original_filename: file.originalname,
+          });
+          evidenceFiles.push({
+            url: result.secure_url,
+            publicId: result.public_id,
+            originalName: file.originalname,
+            resourceType: result.resource_type,
+          });
+        } catch (uploadErr) {
+          console.error("Cloudinary upload error:", uploadErr.message);
+        }
+      }
+    }
+
+    if (b64List.length > 0) {
+      const max = Math.min(b64List.length, 5);
+      for (let i = 0; i < max; i++) {
+        const item = b64List[i];
+        if (!item || typeof item.data !== "string") continue;
+        let raw = item.data.trim();
+        const comma = raw.indexOf("base64,");
+        if (comma !== -1) raw = raw.slice(comma + 7);
+        const mime = item.mime || "image/jpeg";
+        if (!mime.startsWith("image/") && mime !== "application/pdf") continue;
+        try {
+          const buffer = Buffer.from(raw, "base64");
+          if (!buffer.length) continue;
+          const result = await uploadBuffer(buffer, {
+            folder: `educa/evidence/${student._id}`,
+            original_filename: item.name || `evidence_${i + 1}`,
+          });
+          evidenceFiles.push({
+            url: result.secure_url,
+            publicId: result.public_id,
+            originalName: item.name || `evidence_${i + 1}`,
+            resourceType: result.resource_type,
+          });
+        } catch (uploadErr) {
+          console.error("Cloudinary upload error (b64):", uploadErr.message);
+        }
+      }
+    }
+
+    if ((hadMultipart || b64List.length > 0) && evidenceFiles.length === 0) {
+      return res.status(503).json({
+        message:
+          "Evidence upload failed (e.g. Cloudinary not configured). Set CLOUDINARY_* in .env and try again.",
+      });
+    }
+
+    const entryDate = date ? new Date(date) : new Date();
+    const weekNumber = getWeekNumber(entryDate);
+
+    portfolio.academic.push({
+      schoolId: student.schoolId,
+      weekNumber,
+      term,
+      assessmentType,
+      subject,
+      testName,
+      marksObtained: marksObtained !== undefined ? Number(marksObtained) : undefined,
+      maxMarks: maxMarks !== undefined ? Number(maxMarks) : undefined,
+      grade,
+      remarks,
+      evidenceFiles,
+      date: entryDate,
     });
 
     await portfolio.save();
-
-    res.json({
-      message: "Academic record added successfully",
-      data: portfolio,
-    });
+    res.json({ message: "Academic record added successfully", data: portfolio });
   } catch (error) {
     console.error("addAcademicRecord error:", error);
     res.status(500).json({ message: "Error adding academic record" });
@@ -857,48 +913,43 @@ exports.addBehaviorRecord = async (req, res) => {
     const {
       date,
       discipline,
+      respect,
+      attention,
+      interaction,
       attendanceBehavior,
       participation,
       socialInteraction,
       teacherComment,
+      teacherRemark,
     } = req.body;
 
-    const { error, student } = await ensureTeacherOrAdminCanAccessStudent(
-      req,
-      id
-    );
-    if (error) {
-      return res.status(error.status).json({ message: error.message });
-    }
+    const { error, student } = await ensureTeacherOrAdminCanAccessStudent(req, id);
+    if (error) return res.status(error.status).json({ message: error.message });
 
     const studentIdentityId = await ensureStudentIdentityForStudent(student);
 
-    let portfolio =
-      (await StudentPortfolio.findOne({ studentIdentityId })) ||
-      (await StudentPortfolio.findOne({ studentId: student._id }));
-    if (!portfolio) {
-      portfolio = await StudentPortfolio.create({
-        studentId: student._id,
-        studentIdentityId,
-      });
-    }
+    const portfolio = await resolvePortfolioForStudent(student, studentIdentityId);
+
+    const entryDate = date ? new Date(date) : new Date();
+    const weekNumber = getWeekNumber(entryDate);
 
     portfolio.behavior.push({
       schoolId: student.schoolId,
-      date,
+      weekNumber,
+      date: entryDate,
       discipline,
+      respect,
+      attention,
+      interaction,
       attendanceBehavior,
       participation,
       socialInteraction,
       teacherComment,
+      teacherRemark,
     });
 
     await portfolio.save();
-
-    res.json({
-      message: "Behavior record added successfully",
-      data: portfolio,
-    });
+    res.json({ message: "Behavior record added successfully", data: portfolio });
   } catch (error) {
     console.error("addBehaviorRecord error:", error);
     res.status(500).json({ message: "Error adding behavior record" });
@@ -909,46 +960,34 @@ exports.addBehaviorRecord = async (req, res) => {
 exports.addSkillRecord = async (req, res) => {
   try {
     const { id } = req.params;
-    const { area, rating, remark, date } = req.body;
+    const { area, rating, ratingLabel, remark, date } = req.body;
 
     if (!area) {
       return res.status(400).json({ message: "Skill area is required" });
     }
 
-    const { error, student } = await ensureTeacherOrAdminCanAccessStudent(
-      req,
-      id
-    );
-    if (error) {
-      return res.status(error.status).json({ message: error.message });
-    }
+    const { error, student } = await ensureTeacherOrAdminCanAccessStudent(req, id);
+    if (error) return res.status(error.status).json({ message: error.message });
 
     const studentIdentityId = await ensureStudentIdentityForStudent(student);
 
-    let portfolio =
-      (await StudentPortfolio.findOne({ studentIdentityId })) ||
-      (await StudentPortfolio.findOne({ studentId: student._id }));
-    if (!portfolio) {
-      portfolio = await StudentPortfolio.create({
-        studentId: student._id,
-        studentIdentityId,
-      });
-    }
+    const portfolio = await resolvePortfolioForStudent(student, studentIdentityId);
+
+    const entryDate = date ? new Date(date) : new Date();
+    const weekNumber = getWeekNumber(entryDate);
 
     portfolio.skills.push({
       schoolId: student.schoolId,
+      weekNumber,
       area,
+      ratingLabel,
       rating,
       remark,
-      date,
+      date: entryDate,
     });
 
     await portfolio.save();
-
-    res.json({
-      message: "Skill record added successfully",
-      data: portfolio,
-    });
+    res.json({ message: "Skill record added successfully", data: portfolio });
   } catch (error) {
     console.error("addSkillRecord error:", error);
     res.status(500).json({ message: "Error adding skill record" });
@@ -988,6 +1027,77 @@ exports.updateStudent = async (req, res) => {
   } catch (error) {
     console.error("updateStudent error:", error);
     res.status(500).json({ message: "Error updating student" });
+  }
+};
+
+// Add a wellbeing record to a student's portfolio
+exports.addWellbeingRecord = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, tags, teacherRemark, date } = req.body;
+
+    if (!status) {
+      return res.status(400).json({ message: "Wellbeing status is required" });
+    }
+
+    const { error, student } = await ensureTeacherOrAdminCanAccessStudent(req, id);
+    if (error) return res.status(error.status).json({ message: error.message });
+
+    const studentIdentityId = await ensureStudentIdentityForStudent(student);
+
+    const portfolio = await resolvePortfolioForStudent(student, studentIdentityId);
+
+    const entryDate = date ? new Date(date) : new Date();
+    const weekNumber = getWeekNumber(entryDate);
+
+    portfolio.wellbeing.push({
+      schoolId: student.schoolId,
+      weekNumber,
+      date: entryDate,
+      status,
+      tags: Array.isArray(tags) ? tags : [],
+      teacherRemark,
+    });
+
+    await portfolio.save();
+    res.json({ message: "Wellbeing record added successfully", data: portfolio });
+  } catch (error) {
+    console.error("addWellbeingRecord error:", error);
+    res.status(500).json({ message: "Error adding wellbeing record" });
+  }
+};
+
+// Get AI-powered holistic analysis for a student
+exports.getAIAnalysis = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { error, student } = await ensureTeacherOrAdminCanAccessStudent(req, id);
+    if (error) return res.status(error.status).json({ message: error.message });
+
+    const studentIdentityId = await ensureStudentIdentityForStudent(student);
+
+    const portfolio = await resolvePortfolioForStudent(student, studentIdentityId);
+
+    if (portfolioEntryCount(portfolio) === 0) {
+      return res.json({
+        data: {
+          academicWeekly: [],
+          behaviorWeekly: [],
+          skillWeekly: [],
+          holisticScore: { academic: null, behavior: null, skill: null, overall: null },
+          trends: { academic: "stable", behavior: "stable", skill: "stable" },
+          emotionalRisk: { isAtRisk: false, consecutiveLowWeeks: 0, riskTagCount: 0, recentStatus: null },
+          aiInsights: ["No portfolio data available yet. Start adding weekly records to unlock AI insights."],
+        },
+      });
+    }
+
+    const analysis = await analyzePortfolio(portfolio, student.name);
+    res.json({ data: analysis });
+  } catch (error) {
+    console.error("getAIAnalysis error:", error);
+    res.status(500).json({ message: "Error generating AI analysis" });
   }
 };
 

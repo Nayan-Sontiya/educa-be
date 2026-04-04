@@ -5,7 +5,11 @@ const multer = require("multer");
 const path = require("path");
 const {
   registerSchool,
-  getSchools,
+  getSchoolsVerifiedPublic,
+  getSchoolsForAdmin,
+  getPlatformSchoolStats,
+  getSchoolAdminSummary,
+  getPlatformSchoolDetail,
   getSchoolsWithReviews,
   getSchoolWithReviews,
   sendOtp,
@@ -50,11 +54,34 @@ router.post(
 router.post("/send-otp", sendOtp);
 router.post("/verify-otp", verifyOtp);
 
-router.get("/", getSchools); // public route for listing schools
+// Public directory: only approved (Verified) schools
+router.get("/", getSchoolsVerifiedPublic);
+
 router.get("/discover", getSchoolsWithReviews); // public route for school discovery with reviews
 router.get("/discover/:id", getSchoolWithReviews); // public route for single school detail with reviews
 
-// Admin: update verification status
+// Platform admin (full school list & stats — not public)
+router.get(
+  "/admin/stats",
+  protect,
+  roleCheck(["admin"]),
+  getPlatformSchoolStats
+);
+router.get(
+  "/admin/:schoolId/summary",
+  protect,
+  roleCheck(["admin"]),
+  getSchoolAdminSummary
+);
+router.get(
+  "/admin/:schoolId/detail",
+  protect,
+  roleCheck(["admin"]),
+  getPlatformSchoolDetail
+);
+router.get("/admin", protect, roleCheck(["admin"]), getSchoolsForAdmin);
+
+// Admin: update verification / approval status
 router.patch(
   "/:id/verification",
   protect,

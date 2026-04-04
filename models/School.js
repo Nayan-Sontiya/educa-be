@@ -34,12 +34,21 @@ const schoolSchema = new mongoose.Schema(
       affiliationCertificate: String,
       principalIdProof: String,
     },
-    // verification
+    // verification / platform admin workflow
     verificationStatus: {
       type: String,
-      enum: ["Pending", "Verified", "Rejected"],
+      enum: [
+        "Pending",
+        "Verified",
+        "Rejected",
+        "Blocked",
+        "Suspended",
+        "NeedMoreInfo",
+      ],
       default: "Pending",
     },
+    rejectionReason: { type: String, trim: true },
+    reviewNote: { type: String, trim: true },
     udiseVerified: { type: Boolean, default: false },
     // OTP for mobile verification (dev only)
     otp: {

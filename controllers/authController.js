@@ -1,5 +1,7 @@
 // controllers/authController.js
 const User = require("../models/User");
+const School = require("../models/School");
+const { schoolAccessMessage } = require("../utils/schoolAccessMessage");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const { normalizePhone } = require("../utils/phone");
@@ -12,6 +14,12 @@ exports.registerUser = async (req, res) => {
     // Validation
     if (!name || !password || !role) {
       return res.status(400).json({ message: "Missing required fields" });
+    }
+
+    if (role === "admin") {
+      return res.status(403).json({
+        message: "Platform admin accounts cannot be registered via signup",
+      });
     }
 
     // For non-parent/student roles, email is required
@@ -86,6 +94,7 @@ exports.registerUser = async (req, res) => {
       schoolId: user.schoolId,
       createdAt: user.createdAt,
       role: user.role,
+      isBlocked: user.isBlocked === true,
     };
 
     res.status(201).json({ 
@@ -154,6 +163,10 @@ exports.loginUser = async (req, res) => {
     const match = await bcrypt.compare(password, user.password);
     if (!match) return res.status(400).json({ message: "Invalid credentials" });
 
+    if (user.isBlocked === true) {
+      return res.status(403).json({ message: "Your account has been blocked" });
+    }
+
     // 👇 Check teacher status if role is teacher
     if (user.role === "teacher") {
       const teacher = await Teacher.findOne({ userId: user._id });
@@ -164,6 +177,20 @@ exports.loginUser = async (req, res) => {
 
       if (teacher.status !== "active") {
         return res.status(403).json({ message: "Your account is not active" });
+      }
+    }
+
+    if (user.role === "school_admin" && user.schoolId) {
+      const school = await School.findById(user.schoolId).select(
+        "verificationStatus rejectionReason reviewNote name"
+      );
+      if (!school) {
+        return res.status(403).json({ message: "School not found for this account" });
+      }
+      if (school.verificationStatus !== "Verified") {
+        return res.status(403).json({
+          message: schoolAccessMessage(school),
+        });
       }
     }
 
@@ -186,6 +213,7 @@ exports.loginUser = async (req, res) => {
       schoolId: user.schoolId,
       createdAt: user.createdAt,
       role: user.role,
+      isBlocked: user.isBlocked === true,
     };
 
     res.json({ 

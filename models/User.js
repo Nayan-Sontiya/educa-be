@@ -88,6 +88,8 @@ const userSchema = new mongoose.Schema(
       enum: ["admin", "teacher", "counselor", "school_admin", "parent", "student"],
       default: "teacher",
     },
+    /** Platform super admin can block sign-in and API access */
+    isBlocked: { type: Boolean, default: false },
     schoolId: { type: mongoose.Schema.Types.ObjectId, ref: "School" },
   },
   { timestamps: true }
