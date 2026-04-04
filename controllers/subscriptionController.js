@@ -221,9 +221,6 @@ exports.createCheckoutSession = async (req, res) => {
     const sessionConfig = {
       mode: "subscription",
       customer: stripeCustomerId,
-      // Dashboard toggles are not enough: UPI must be listed here for Checkout (INR + India).
-      // @see https://docs.stripe.com/payments/upi/accept-a-payment
-      payment_method_types: ["card", "upi"],
       line_items: [{ price: priceId, quantity: studentCount }],
       success_url: `${webAppBase()}/dashboard/subscription?sub=success&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${webAppBase()}/dashboard/subscription?sub=canceled`,
@@ -246,6 +243,17 @@ exports.createCheckoutSession = async (req, res) => {
         },
       },
     };
+
+    // Payment methods: optional pmc_... (must enable UPI etc. for *subscriptions* in Dashboard) or explicit types.
+    // Subscription Checkout ≠ one-time: Stripe filters methods by product support + config. Do not set both keys.
+    const pmcId = process.env.STRIPE_PAYMENT_METHOD_CONFIGURATION_ID?.trim();
+    const pmTypesEnv = process.env.STRIPE_CHECKOUT_PAYMENT_METHOD_TYPES?.trim();
+    if (pmcId) {
+      sessionConfig.payment_method_configuration = pmcId;
+    } else if (pmTypesEnv) {
+      const list = pmTypesEnv.split(",").map((s) => s.trim()).filter(Boolean);
+      if (list.length) sessionConfig.payment_method_types = list;
+    }
 
     // Customer.name is already set to the school name; billing_address_collection handles address.
     // We do not use name_collection here — extra "business name" fields are redundant for schools.
