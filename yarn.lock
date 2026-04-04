@@ -9,6 +9,13 @@
   dependencies:
     sparse-bitfield "^3.0.3"
 
+"@types/node@>=8.1.0":
+  version "25.5.2"
+  resolved "https://registry.npmjs.org/@types/node/-/node-25.5.2.tgz"
+  integrity sha512-tO4ZIRKNC+MDWV4qKVZe3Ql/woTnmHDr5JD8UI5hn2pwBrHEwOEMZK7WlNb5RKB6EoJ02gwmQS9OrjuFnZYdpg==
+  dependencies:
+    undici-types "~7.18.0"
+
 "@types/webidl-conversions@*":
   version "7.0.3"
   resolved "https://registry.npmjs.org/@types/webidl-conversions/-/webidl-conversions-7.0.3.tgz"
@@ -154,7 +161,7 @@ chokidar@^3.5.2:
 
 cloudinary@^2.9.0:
   version "2.9.0"
-  resolved "https://registry.yarnpkg.com/cloudinary/-/cloudinary-2.9.0.tgz#d644c06f1b8569890ca394e55717dd239c2b2ad0"
+  resolved "https://registry.npmjs.org/cloudinary/-/cloudinary-2.9.0.tgz"
   integrity sha512-F3iKMOy4y0zy0bi5JBp94SC7HY7i/ImfTPSUV07iJmRzH1Iz8WavFfOlJTR1zvYM/xKGoiGZ3my/zy64In0IQQ==
   dependencies:
     lodash "^4.17.21"
@@ -560,7 +567,7 @@ lodash.once@^4.0.0:
 
 lodash@^4.17.21:
   version "4.18.1"
-  resolved "https://registry.yarnpkg.com/lodash/-/lodash-4.18.1.tgz#ff2b66c1f6326d59513de2407bf881439812771c"
+  resolved "https://registry.npmjs.org/lodash/-/lodash-4.18.1.tgz"
   integrity sha512-dMInicTPVE8d1e5otfwmmjlxkZoUpiVLwyeTdUsi/Caj/gfzzblBcCE5sRHV/AsjuCmxWrte2TNGSYuCeCq+0Q==
 
 math-intrinsics@^1.1.0:
@@ -781,7 +788,7 @@ once@^1.4.0:
 
 openai@^6.33.0:
   version "6.33.0"
-  resolved "https://registry.yarnpkg.com/openai/-/openai-6.33.0.tgz#d09691a91df327d66d76f39f9b590aa55dd699dd"
+  resolved "https://registry.npmjs.org/openai/-/openai-6.33.0.tgz"
   integrity sha512-xAYN1W3YsDXJWA5F277135YfkEk6H7D3D6vWwRhJ3OEkzRgcyK8z/P5P9Gyi/wB4N8kK9kM5ZjprfvyHagKmpw==
 
 parseurl@^1.3.3:
@@ -822,7 +829,7 @@ punycode@^2.3.1:
   resolved "https://registry.npmjs.org/punycode/-/punycode-2.3.1.tgz"
   integrity sha512-vYt7UD1U9Wg6138shLtLOvdAu+8DsC/ilFtEVHcH+wydcSpNE20AfSOduf6MkRFahL5FY7X1oU7nKVZFtfq8Fg==
 
-qs@^6.14.0:
+qs@^6.11.0, qs@^6.14.0:
   version "6.14.0"
   resolved "https://registry.npmjs.org/qs/-/qs-6.14.0.tgz"
   integrity sha512-YWWTjgABSKcvs/nWBi9PycY/JiPJqOD4JA6o9Sej2AtvSGarXxKC3OQSk4pAarbdQlKAh5D4FCQkJNkW+GAn3w==
@@ -1008,6 +1015,14 @@ string_decoder@~1.1.1:
   dependencies:
     safe-buffer "~5.1.0"
 
+stripe@^17.7.0:
+  version "17.7.0"
+  resolved "https://registry.npmjs.org/stripe/-/stripe-17.7.0.tgz"
+  integrity sha512-aT2BU9KkizY9SATf14WhhYVv2uOapBWX0OFWF4xvcj1mPaNotlSc2CsxpS4DS46ZueSppmCF5BX1sNYBtwBvfw==
+  dependencies:
+    "@types/node" ">=8.1.0"
+    qs "^6.11.0"
+
 supports-color@^5.5.0:
   version "5.5.0"
   resolved "https://registry.npmjs.org/supports-color/-/supports-color-5.5.0.tgz"
@@ -1070,6 +1085,11 @@ undefsafe@^2.0.5:
   version "2.0.5"
   resolved "https://registry.npmjs.org/undefsafe/-/undefsafe-2.0.5.tgz"
   integrity sha512-WxONCrssBM8TSPRqN5EmsjVrsv4A8X12J4ArBiiayv3DyyG3ZlIg6yysuuSYdZsVz3TKcTg2fd//Ujd4CHV1iA==
+
+undici-types@~7.18.0:
+  version "7.18.2"
+  resolved "https://registry.npmjs.org/undici-types/-/undici-types-7.18.2.tgz"
+  integrity sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w==
 
 unpipe@1.0.0:
   version "1.0.0"

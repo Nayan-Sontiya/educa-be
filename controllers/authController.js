@@ -4,6 +4,8 @@ const School = require("../models/School");
 const { schoolAccessMessage } = require("../utils/schoolAccessMessage");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
+const { resolveSchoolIdForUser } = require("../utils/resolveSchoolId");
+const { isSchoolSubscriptionSuspended } = require("../utils/subscriptionAccess");
 const { normalizePhone } = require("../utils/phone");
 const Teacher = require("../models/Teacher");
 
@@ -190,6 +192,16 @@ exports.loginUser = async (req, res) => {
       if (school.verificationStatus !== "Verified") {
         return res.status(403).json({
           message: schoolAccessMessage(school),
+        });
+      }
+    }
+
+    if (user.role !== "admin") {
+      const schoolId = await resolveSchoolIdForUser(user);
+      if (schoolId && (await isSchoolSubscriptionSuspended(schoolId))) {
+        return res.status(403).json({
+          message: "Subscription expired. Please renew to continue.",
+          code: "SUBSCRIPTION_SUSPENDED",
         });
       }
     }

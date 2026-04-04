@@ -1,12 +1,23 @@
 // server.js
+const path = require("path");
+// override: true — if STRIPE_* (etc.) exist in the OS env as empty placeholders, dotenv
+// would otherwise skip them and leave secrets missing.
+require("dotenv").config({ path: path.join(__dirname, ".env"), override: true });
+
 const express = require("express");
-const dotenv = require("dotenv");
 const morgan = require("morgan");
 const cors = require("cors");
 const connectDB = require("./config/db");
-
-dotenv.config();
 const app = express();
+
+const subscriptionController = require("./controllers/subscriptionController");
+
+// Stripe webhook must receive raw body (before express.json)
+app.post(
+  "/api/subscription/webhook",
+  express.raw({ type: "application/json" }),
+  (req, res) => subscriptionController.handleStripeWebhook(req, res)
+);
 
 // Middlewares
 // Large limit: academic evidence can be sent as JSON base64 from Expo (multipart is unreliable on RN)
@@ -17,7 +28,6 @@ app.use(morgan("dev"));
 // Serve uploaded files statically
 // Files can be accessed at: http://localhost:5000/uploads/filename.ext
 // Example: http://localhost:5000/uploads/1761501010261-277639906.png
-const path = require("path");
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 // Brand assets (e.g. logo in transactional emails when API_PUBLIC_URL is set)
 app.use("/brand", express.static(path.join(__dirname, "assets", "brand")));
@@ -48,9 +58,11 @@ app.use("/api/parent-alerts", require("./routes/parentAlertRoutes"));
 app.use("/api/conversations", require("./routes/conversationRoutes"));
 app.use("/api/student-leaves", require("./routes/studentLeaveRoutes"));
 app.use("/api/teacher-attendance", require("./routes/teacherAttendanceRoutes"));
+app.use("/api/subscription", require("./routes/subscriptionRoutes"));
 
 // Cron jobs
 require("./cron/markTeachersAbsent");
+require("./cron/subscriptionJobs");
 
 app.get("/", (req, res) => res.send("EduVerse API is running 🚀"));
 
