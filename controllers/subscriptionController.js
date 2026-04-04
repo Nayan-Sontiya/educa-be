@@ -221,6 +221,9 @@ exports.createCheckoutSession = async (req, res) => {
     const sessionConfig = {
       mode: "subscription",
       customer: stripeCustomerId,
+      // Dashboard toggles are not enough: UPI must be listed here for Checkout (INR + India).
+      // @see https://docs.stripe.com/payments/upi/accept-a-payment
+      payment_method_types: ["card", "upi"],
       line_items: [{ price: priceId, quantity: studentCount }],
       success_url: `${webAppBase()}/dashboard/subscription?sub=success&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${webAppBase()}/dashboard/subscription?sub=canceled`,
