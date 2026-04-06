@@ -578,6 +578,10 @@ exports.updateVerification = async (req, res) => {
 
     const previousStatus = school.verificationStatus;
 
+    if (status === "Verified" && previousStatus !== "Verified") {
+      school.verifiedAt = new Date();
+    }
+
     school.verificationStatus = status;
     if (status === "Rejected") {
       if (rejectionReason !== undefined) {

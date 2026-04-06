@@ -3,6 +3,8 @@ const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const User = require("../models/User");
 const { normalizePhone } = require("../utils/phone");
+const { resolveSchoolIdForUser } = require("../utils/resolveSchoolId");
+const { getSchoolBillingAccess } = require("../utils/subscriptionAccess");
 
 const ROLE_ENUM = ["admin", "teacher", "counselor", "school_admin", "parent", "student"];
 
@@ -38,11 +40,34 @@ exports.getCurrentUser = async (req, res) => {
   try {
     const user = await User.findById(req.user.id)
       .select("-password")
-      .populate("schoolId", "name");
+      .populate("schoolId", "name verificationStatus verifiedAt");
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
-    res.json(user);
+    const payload = user.toObject ? user.toObject() : user;
+    if (user.role !== "admin") {
+      const sid = await resolveSchoolIdForUser(user);
+      if (sid) {
+        const schoolLean =
+          user.schoolId &&
+          typeof user.schoolId === "object" &&
+          user.schoolId.verificationStatus !== undefined
+            ? {
+                verificationStatus: user.schoolId.verificationStatus,
+                verifiedAt: user.schoolId.verifiedAt,
+                createdAt: user.schoolId.createdAt,
+              }
+            : null;
+        const billing = await getSchoolBillingAccess(sid, { school: schoolLean });
+        payload.schoolBilling = {
+          inTrial: Boolean(billing.inTrial),
+          trialEndsAt: billing.trialEndsAt,
+          needsSubscription: Boolean(billing.needsSubscription),
+          accessBlocked: !billing.allowed,
+        };
+      }
+    }
+    res.json(payload);
   } catch (error) {
     res.status(500).json({ message: "Error fetching user profile" });
   }

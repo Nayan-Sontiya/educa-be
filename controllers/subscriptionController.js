@@ -5,6 +5,11 @@ const Student = require("../models/Student");
 const SchoolSubscription = require("../models/SchoolSubscription");
 const BillingSettings = require("../models/BillingSettings");
 const { planAmountPaise, stripeIntervalForPlan } = require("../utils/subscriptionPricing");
+const {
+  getSchoolBillingAccess,
+  trialEndsAtFromSchool,
+  subscriptionAnchoredAfterSchoolTrial,
+} = require("../utils/subscriptionAccess");
 const { sendMail } = require("../utils/mail");
 
 function stripeSecretKey() {
@@ -33,7 +38,6 @@ async function getBillingSettingsDoc() {
     b = await BillingSettings.create({
       _id: "global",
       pricePerStudentYearInr: Number(process.env.SUBSCRIPTION_PRICE_PER_STUDENT_YEAR_INR) || 300,
-      gracePeriodDays: Number(process.env.SUBSCRIPTION_GRACE_DAYS) || 3,
     });
   }
   return b;
@@ -44,6 +48,13 @@ async function countActiveStudents(schoolId) {
     schoolId: new mongoose.Types.ObjectId(schoolId),
     status: "active",
   });
+}
+
+/** API + webhooks use "trialing" in Mongo; legacy "active" rows still read as trialing for clients. */
+function subscriptionStatusForClient(raw) {
+  if (!raw) return "none";
+  if (raw === "active") return "trialing";
+  return raw;
 }
 
 function webAppBase() {
@@ -129,7 +140,7 @@ async function ensureStripeCustomerForSchoolCheckout(stripe, subDoc, school) {
 
 /**
  * POST /api/subscription/checkout — school_admin
- * body: { priceId: string } — must be an active recurring price on STRIPE_PRODUCT_ID (per-seat unit × student count).
+ * body: { priceId: string } — recurring price on STRIPE_PRODUCT_ID; quantity is always active students on the roster.
  */
 exports.createCheckoutSession = async (req, res) => {
   try {
@@ -152,6 +163,21 @@ exports.createCheckoutSession = async (req, res) => {
       return res.status(400).json({
         message:
           "Complete your school profile (name, address line 1, city, PIN code) before paying. Stripe requires this for India export compliance.",
+      });
+    }
+
+    const trialAccess = await getSchoolBillingAccess(school._id, {
+      school: {
+        verificationStatus: school.verificationStatus,
+        verifiedAt: school.verifiedAt,
+        createdAt: school.createdAt,
+      },
+    });
+    if (trialAccess.inTrial) {
+      return res.status(403).json({
+        message:
+          "Your school is still in the free trial. You can subscribe after the trial ends.",
+        code: "TRIAL_ACTIVE_NO_CHECKOUT",
       });
     }
 
@@ -180,10 +206,12 @@ exports.createCheckoutSession = async (req, res) => {
     }
 
     const billing = await getBillingSettingsDoc();
-    const studentCount = await countActiveStudents(school._id);
-    if (studentCount < 1) {
+    const activeStudents = await countActiveStudents(school._id);
+    if (activeStudents < 1) {
       return res.status(400).json({ message: "Add at least one active student before subscribing" });
     }
+
+    const studentCount = activeStudents;
 
     const unitMinor = stripePrice.unit_amount;
     if (unitMinor == null || unitMinor < 1) {
@@ -234,31 +262,53 @@ exports.createCheckoutSession = async (req, res) => {
         plan,
         stripePriceId: priceId,
         mongoSubscriptionId: subDoc._id.toString(),
+        billedSeatQuantity: String(studentCount),
       },
       subscription_data: {
         metadata: {
           schoolId: school._id.toString(),
           plan,
           stripePriceId: priceId,
+          billedSeatQuantity: String(studentCount),
         },
       },
     };
 
-    // Payment methods: optional pmc_... (must enable UPI etc. for *subscriptions* in Dashboard) or explicit types.
-    // Subscription Checkout ≠ one-time: Stripe filters methods by product support + config. Do not set both keys.
+    // Payment methods (pick one path):
+    // - payment_method_configuration (pmc_...) — Dashboard config
+    // - payment_method_types — explicit list
+    // - automatic_payment_methods — same idea as PaymentIntents: let Stripe choose from Dashboard (when supported on your API version)
     const pmcId = process.env.STRIPE_PAYMENT_METHOD_CONFIGURATION_ID?.trim();
     const pmTypesEnv = process.env.STRIPE_CHECKOUT_PAYMENT_METHOD_TYPES?.trim();
+    const apmOff = process.env.STRIPE_CHECKOUT_AUTOMATIC_PAYMENT_METHODS === "false";
+
     if (pmcId) {
       sessionConfig.payment_method_configuration = pmcId;
     } else if (pmTypesEnv) {
       const list = pmTypesEnv.split(",").map((s) => s.trim()).filter(Boolean);
       if (list.length) sessionConfig.payment_method_types = list;
+    } else if (!apmOff) {
+      sessionConfig.automatic_payment_methods = { enabled: true };
     }
 
     // Customer.name is already set to the school name; billing_address_collection handles address.
     // We do not use name_collection here — extra "business name" fields are redundant for schools.
 
-    const session = await stripe.checkout.sessions.create(sessionConfig);
+    let session;
+    try {
+      session = await stripe.checkout.sessions.create(sessionConfig);
+    } catch (firstErr) {
+      const msg = String(firstErr?.message || "");
+      if (
+        sessionConfig.automatic_payment_methods &&
+        (msg.includes("automatic_payment_methods") || firstErr?.param === "automatic_payment_methods")
+      ) {
+        delete sessionConfig.automatic_payment_methods;
+        session = await stripe.checkout.sessions.create(sessionConfig);
+      } else {
+        throw firstErr;
+      }
+    }
 
     return res.json({
       data: {
@@ -353,9 +403,38 @@ exports.getSubscriptionStatus = async (req, res) => {
     const billing = await getBillingSettingsDoc();
     const studentCount = await countActiveStudents(user.schoolId);
     const sub = await SchoolSubscription.findOne({ schoolId: user.schoolId }).lean();
-    const school = await School.findById(user.schoolId).select("name email").lean();
+    const school = await School.findById(user.schoolId)
+      .select("name email verificationStatus verifiedAt createdAt")
+      .lean();
+    const trialAccess = await getSchoolBillingAccess(user.schoolId, { school });
 
-    const plan = sub?.plan || null;
+    const schoolTrialEnd = trialEndsAtFromSchool(school);
+    const adminUnblockActive =
+      sub?.adminUnblockUntil && new Date(sub.adminUnblockUntil) > new Date();
+    const maskStaleMongoSub =
+      !adminUnblockActive &&
+      Boolean(school?.verifiedAt && schoolTrialEnd) &&
+      Date.now() > schoolTrialEnd.getTime() &&
+      !subscriptionAnchoredAfterSchoolTrial(sub, schoolTrialEnd);
+
+    let plan = sub?.plan || null;
+    let statusOut = subscriptionStatusForClient(sub?.status);
+    let currentPeriodStart = sub?.currentPeriodStart;
+    let currentPeriodEnd = sub?.currentPeriodEnd;
+    let graceEndsAt = sub?.graceEndsAt;
+    let lastPaymentAt = sub?.lastPaymentAt;
+    let billingMode = sub?.billingMode || null;
+
+    if (maskStaleMongoSub) {
+      plan = null;
+      statusOut = "none";
+      currentPeriodStart = undefined;
+      currentPeriodEnd = undefined;
+      graceEndsAt = undefined;
+      lastPaymentAt = undefined;
+      billingMode = null;
+    }
+
     const amountPaise =
       plan && ["monthly", "quarterly", "yearly"].includes(plan)
         ? planAmountPaise(plan, studentCount, billing.pricePerStudentYearInr)
@@ -380,14 +459,19 @@ exports.getSubscriptionStatus = async (req, res) => {
         plan,
         amountsInr,
         currentPeriodAmountInr: amountPaise != null ? amountPaise / 100 : null,
-        status: sub?.status || "none",
-        currentPeriodStart: sub?.currentPeriodStart,
-        currentPeriodEnd: sub?.currentPeriodEnd,
-        graceEndsAt: sub?.graceEndsAt,
+        status: statusOut,
+        currentPeriodStart,
+        currentPeriodEnd,
+        graceEndsAt,
         adminUnblockUntil: sub?.adminUnblockUntil,
-        lastPaymentAt: sub?.lastPaymentAt,
-        billingMode: sub?.billingMode || null,
+        lastPaymentAt,
+        billingMode,
         stripeConfigured: isStripeConfigured(),
+        trialEndsAt: trialAccess.trialEndsAt,
+        inTrial: trialAccess.inTrial,
+        needsSubscription: trialAccess.needsSubscription,
+        hasBillingAccess: trialAccess.allowed,
+        staleSubscriptionIgnored: maskStaleMongoSub,
       },
     });
   } catch (err) {
@@ -481,21 +565,6 @@ exports.syncStudentCountToStripe = async (req, res) => {
   }
 };
 
-async function applyGraceIfNeeded(subDoc, billing) {
-  if (
-    subDoc.status === "grace" &&
-    subDoc.graceEndsAt &&
-    new Date(subDoc.graceEndsAt) > new Date()
-  ) {
-    return;
-  }
-  const days = billing.gracePeriodDays ?? 3;
-  subDoc.status = "grace";
-  subDoc.graceStartedAt = new Date();
-  subDoc.graceEndsAt = new Date(Date.now() + days * 86400000);
-  await subDoc.save();
-}
-
 async function handleInvoicePaid(stripe, invoice, fallbackSchoolId) {
   const subId = invoice.subscription;
   if (!subId) return;
@@ -507,7 +576,8 @@ async function handleInvoicePaid(stripe, invoice, fallbackSchoolId) {
   const subDoc = await SchoolSubscription.findOne({ schoolId });
   if (!subDoc) return;
 
-  subDoc.status = "active";
+  // Product convention at launch: persist good-standing subs as "trialing" (not "active") in Mongo.
+  subDoc.status = "trialing";
   subDoc.stripeSubscriptionId = stripeSub.id;
   const cust = stripeSub.customer;
   subDoc.stripeCustomerId = typeof cust === "string" ? cust : cust?.id;
@@ -532,15 +602,18 @@ async function handleInvoicePaymentFailed(stripe, invoice) {
   const subDoc = await SchoolSubscription.findOne({ schoolId });
   if (!subDoc) return;
 
-  const billing = await getBillingSettingsDoc();
-  await applyGraceIfNeeded(subDoc, billing);
+  subDoc.status = "suspended";
+  subDoc.graceStartedAt = undefined;
+  subDoc.graceEndsAt = undefined;
+  subDoc.graceReminderDay = undefined;
+  await subDoc.save();
 
   const school = await School.findById(schoolId).select("email name").lean();
   if (school?.email) {
     await sendMail({
       to: school.email,
-      subject: "Payment failed — please update your subscription",
-      text: `Your Utthan/Educa subscription payment did not go through. You have a ${billing.gracePeriodDays}-day grace period before access is suspended. Please update your payment method in the billing portal or complete payment from your school dashboard.`,
+      subject: "Payment failed — subscription access paused",
+      text: `Your Utthan/Educa subscription payment did not go through. Staff and parent access is paused until payment succeeds. The school admin can update the payment method or complete payment from the school billing dashboard.`,
       logContext: "subscription_payment_failed",
     });
   }
@@ -554,18 +627,22 @@ async function handleSubscriptionUpdated(stripeSub, fallbackSchoolId) {
   if (!subDoc) return;
 
   if (stripeSub.status === "active" || stripeSub.status === "trialing") {
-    subDoc.status = "active";
+    subDoc.status = "trialing";
     subDoc.currentPeriodStart = new Date(stripeSub.current_period_start * 1000);
     subDoc.currentPeriodEnd = new Date(stripeSub.current_period_end * 1000);
     subDoc.graceEndsAt = undefined;
     subDoc.graceStartedAt = undefined;
+    subDoc.graceReminderDay = undefined;
   } else if (stripeSub.status === "past_due") {
-    const billing = await getBillingSettingsDoc();
-    if (!subDoc.graceEndsAt || new Date(subDoc.graceEndsAt) <= new Date()) {
-      await applyGraceIfNeeded(subDoc, billing);
-    }
+    subDoc.status = "suspended";
+    subDoc.graceStartedAt = undefined;
+    subDoc.graceEndsAt = undefined;
+    subDoc.graceReminderDay = undefined;
   } else if (stripeSub.status === "unpaid") {
     subDoc.status = "suspended";
+    subDoc.graceStartedAt = undefined;
+    subDoc.graceEndsAt = undefined;
+    subDoc.graceReminderDay = undefined;
   } else if (stripeSub.status === "canceled") {
     subDoc.status = "canceled";
     subDoc.canceledAt = new Date();
@@ -593,6 +670,18 @@ exports.confirmCheckoutSession = async (req, res) => {
     const user = await require("../models/User").findById(req.user.id);
     if (!user || user.role !== "school_admin" || !user.schoolId) {
       return res.status(403).json({ message: "Forbidden" });
+    }
+
+    const schoolForTrial = await School.findById(user.schoolId)
+      .select("verificationStatus verifiedAt createdAt")
+      .lean();
+    const trialAccess = await getSchoolBillingAccess(user.schoolId, { school: schoolForTrial });
+    if (trialAccess.inTrial) {
+      return res.status(403).json({
+        message:
+          "Your school is still in the free trial. Subscription checkout is not available until the trial ends.",
+        code: "TRIAL_ACTIVE_NO_CHECKOUT",
+      });
     }
 
     const { sessionId } = req.body || {};
@@ -639,7 +728,7 @@ exports.confirmCheckoutSession = async (req, res) => {
     return res.json({
       message: "Synced from Stripe",
       data: {
-        status: refreshed?.status,
+        status: subscriptionStatusForClient(refreshed?.status),
         stripeSubscriptionId: refreshed?.stripeSubscriptionId,
         currentPeriodEnd: refreshed?.currentPeriodEnd,
       },
@@ -712,11 +801,11 @@ exports.handleStripeWebhook = async (req, res) => {
   res.json({ received: true });
 };
 
-/** Used by cron */
-exports.runReminderAndGraceJobs = async () => {
-  const stripe = getStripe();
+/** Used by cron — pre-renewal reminders only (no grace period). */
+exports.runSubscriptionReminderJobs = async () => {
   const subs = await SchoolSubscription.find({
-    $or: [{ status: "active", currentPeriodEnd: { $ne: null } }, { status: "grace" }],
+    status: { $in: ["trialing", "active"] },
+    currentPeriodEnd: { $ne: null },
   });
 
   const now = new Date();
@@ -727,62 +816,36 @@ exports.runReminderAndGraceJobs = async () => {
     if (!school?.email) continue;
 
     const end = sub.currentPeriodEnd ? new Date(sub.currentPeriodEnd) : null;
-    if (end && sub.status === "active") {
-      const daysLeft = Math.ceil((end.getTime() - now.getTime()) / dayMs);
-      if (daysLeft === 3 && !sub.remindersSent.preDue3) {
-        sub.remindersSent.preDue3 = true;
-        await sub.save();
-        await sendMail({
-          to: school.email,
-          subject: "Subscription renews in 3 days",
-          text: `Your school subscription will renew in about 3 days (${end.toDateString()}). Ensure your payment method is up to date.`,
-          logContext: "sub_reminder_3d",
-        });
-      } else if (daysLeft === 2 && !sub.remindersSent.preDue2) {
-        sub.remindersSent.preDue2 = true;
-        await sub.save();
-        await sendMail({
-          to: school.email,
-          subject: "Subscription renews in 2 days",
-          text: `Reminder: subscription renewal in 2 days (${end.toDateString()}).`,
-          logContext: "sub_reminder_2d",
-        });
-      } else if (daysLeft === 1 && !sub.remindersSent.preDue1) {
-        sub.remindersSent.preDue1 = true;
-        await sub.save();
-        await sendMail({
-          to: school.email,
-          subject: "Subscription renews tomorrow",
-          text: `Your subscription renews tomorrow (${end.toDateString()}).`,
-          logContext: "sub_reminder_1d",
-        });
-      }
-    }
+    if (!end) continue;
 
-    if (sub.status === "grace" && sub.graceEndsAt) {
-      if (new Date(sub.graceEndsAt) <= now) {
-        sub.status = "suspended";
-        await sub.save();
-        if (stripe && sub.stripeSubscriptionId) {
-          try {
-            await stripe.subscriptions.cancel(sub.stripeSubscriptionId);
-          } catch (e) {
-            console.warn("Stripe cancel after suspend:", e.message);
-          }
-        }
-      } else {
-        const dayKey = now.toISOString().slice(0, 10);
-        if (sub.graceReminderDay !== dayKey) {
-          sub.graceReminderDay = dayKey;
-          await sub.save();
-          await sendMail({
-            to: school.email,
-            subject: "Payment overdue — grace period",
-            text: `Your payment is overdue. Please pay before ${new Date(sub.graceEndsAt).toDateString()} to avoid service interruption.`,
-            logContext: "sub_grace_daily",
-          });
-        }
-      }
+    const daysLeft = Math.ceil((end.getTime() - now.getTime()) / dayMs);
+    if (daysLeft === 3 && !sub.remindersSent.preDue3) {
+      sub.remindersSent.preDue3 = true;
+      await sub.save();
+      await sendMail({
+        to: school.email,
+        subject: "Subscription renews in 3 days",
+        text: `Your school subscription will renew in about 3 days (${end.toDateString()}). Ensure your payment method is up to date.`,
+        logContext: "sub_reminder_3d",
+      });
+    } else if (daysLeft === 2 && !sub.remindersSent.preDue2) {
+      sub.remindersSent.preDue2 = true;
+      await sub.save();
+      await sendMail({
+        to: school.email,
+        subject: "Subscription renews in 2 days",
+        text: `Reminder: subscription renewal in 2 days (${end.toDateString()}).`,
+        logContext: "sub_reminder_2d",
+      });
+    } else if (daysLeft === 1 && !sub.remindersSent.preDue1) {
+      sub.remindersSent.preDue1 = true;
+      await sub.save();
+      await sendMail({
+        to: school.email,
+        subject: "Subscription renews tomorrow",
+        text: `Your subscription renews tomorrow (${end.toDateString()}).`,
+        logContext: "sub_reminder_1d",
+      });
     }
   }
 };

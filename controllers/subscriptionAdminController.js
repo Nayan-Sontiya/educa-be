@@ -9,7 +9,6 @@ exports.getBillingSettings = async (req, res) => {
       doc = await BillingSettings.create({
         _id: "global",
         pricePerStudentYearInr: Number(process.env.SUBSCRIPTION_PRICE_PER_STUDENT_YEAR_INR) || 300,
-        gracePeriodDays: Number(process.env.SUBSCRIPTION_GRACE_DAYS) || 3,
       });
     }
     return res.json({ data: doc });
@@ -21,11 +20,10 @@ exports.getBillingSettings = async (req, res) => {
 
 exports.patchBillingSettings = async (req, res) => {
   try {
-    const { pricePerStudentYearInr, gracePeriodDays, reminderOffsetsDays } = req.body;
+    const { pricePerStudentYearInr, reminderOffsetsDays } = req.body;
     let doc = await BillingSettings.findById("global");
     if (!doc) doc = new BillingSettings({ _id: "global" });
     if (pricePerStudentYearInr != null) doc.pricePerStudentYearInr = Number(pricePerStudentYearInr);
-    if (gracePeriodDays != null) doc.gracePeriodDays = Number(gracePeriodDays);
     if (Array.isArray(reminderOffsetsDays)) doc.reminderOffsetsDays = reminderOffsetsDays;
     await doc.save();
     return res.json({ data: doc, message: "Updated" });
@@ -66,7 +64,10 @@ exports.patchSchoolSubscription = async (req, res) => {
       sub.adminUnblockUntil = adminUnblockUntil ? new Date(adminUnblockUntil) : undefined;
     }
     if (adminNote !== undefined) sub.adminNote = adminNote;
-    if (forceStatus && ["active", "grace", "suspended", "canceled", "incomplete"].includes(forceStatus)) {
+    if (
+      forceStatus &&
+      ["active", "trialing", "suspended", "canceled", "incomplete"].includes(forceStatus)
+    ) {
       sub.status = forceStatus;
     }
 

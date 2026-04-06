@@ -8,7 +8,7 @@
  *   MAIL_FROM — e.g. "Educa <noreply@yourdomain.com>" (defaults to SMTP_USER)
  *   APP_PUBLIC_URL — used in links and default logo URL in HTML emails
  *   MAIL_BRAND_LOGO_URL — optional full URL to logo image (overrides defaults)
- *   API_PUBLIC_URL — optional API base URL; logo served at /brand/UtthanAI TB Logo.png
+ *   API_PUBLIC_URL — optional API base URL; logo served at /brand/UtthanAI final Logo.PNG
  */
 
 const nodemailer = require("nodemailer");
@@ -129,9 +129,9 @@ function brandLogoUrl() {
   const explicit = (process.env.MAIL_BRAND_LOGO_URL || "").trim();
   if (explicit) return explicit.replace(/\/$/, "");
   const api = (process.env.API_PUBLIC_URL || "").replace(/\/$/, "");
-  if (api) return `${api}/brand/UtthanAI TB Logo.png`;
+  if (api) return `${api}/brand/UtthanAI final Logo.PNG`;
   const app = appBaseUrl();
-  if (app) return `${app}/images/logo/UtthanAI TB Logo.png`;
+  if (app) return `${app}/images/logo/UtthanAI final Logo.PNG`;
   return "";
 }
 
@@ -140,7 +140,7 @@ function brandLogoImgHtml() {
   const url = brandLogoUrl();
   if (!url) return "";
   return `<div style="margin:0 0 20px 0;padding-bottom:16px;border-bottom:1px solid #e5e7eb;">
-<img src="${escapeHtml(url)}" alt="Utthan Ai" width="220" style="display:block;max-width:220px;height:auto;border:0;" />
+<img src="${escapeHtml(url)}" alt="UtthanAI" width="220" style="display:block;max-width:220px;height:auto;border:0;" />
 </div>`;
 }
 

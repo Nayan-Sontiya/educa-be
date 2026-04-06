@@ -49,6 +49,8 @@ const schoolSchema = new mongoose.Schema(
     },
     rejectionReason: { type: String, trim: true },
     reviewNote: { type: String, trim: true },
+    /** Set when platform admin first moves school to Verified; trial window starts here. */
+    verifiedAt: { type: Date },
     udiseVerified: { type: Boolean, default: false },
     // OTP for mobile verification (dev only)
     otp: {

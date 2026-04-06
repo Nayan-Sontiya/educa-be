@@ -3,9 +3,10 @@ const mongoose = require("mongoose");
 const PLAN_ENUM = ["monthly", "quarterly", "yearly", "custom"];
 const STATUS_ENUM = [
   "incomplete", // checkout not finished
+  "trialing", // Stripe subscription trialing (shown in app; good standing)
   "active",
   "past_due", // Stripe past_due or unpaid invoice
-  "grace", // local grace after failed renewal
+  "grace", // legacy only — migrate away; treated like suspended for access
   "suspended", // API access blocked
   "canceled",
 ];

@@ -4,7 +4,37 @@ const User = require("../models/User");
 const School = require("../models/School");
 const { schoolAccessMessage } = require("../utils/schoolAccessMessage");
 const { resolveSchoolIdForUser } = require("../utils/resolveSchoolId");
-const { isSchoolSubscriptionSuspended } = require("../utils/subscriptionAccess");
+const {
+  isSchoolSubscriptionSuspended,
+  getSchoolBillingAccess,
+} = require("../utils/subscriptionAccess");
+
+/**
+ * School admin can reach subscription checkout and minimal profile routes when access is blocked
+ * (trial ended, payment failed / suspended, etc.).
+ */
+function schoolAdminSubscriptionRecoveryPaths(req, role) {
+  if (role !== "school_admin") return false;
+  const path = (req.originalUrl || req.url || "").split("?")[0];
+  if (path.startsWith("/api/subscription/admin/")) return false;
+  if (path.startsWith("/api/subscription/")) return true;
+  if (path === "/api/users/me" || path.startsWith("/api/users/me/")) return true;
+  if (path === "/api/schools/my-school") return true;
+  return false;
+}
+
+/** Allow reading profile (schoolBilling) when billing blocks the rest of the API. GET only. */
+function billingBlockProfileRead(req) {
+  if (req.method !== "GET") return false;
+  const path = (req.originalUrl || req.url || "").split("?")[0];
+  return path === "/api/users/me" || path.startsWith("/api/users/me/");
+}
+
+function bypassesSchoolBillingBlock(req, role) {
+  if (billingBlockProfileRead(req)) return true;
+  if (role === "school_admin" && schoolAdminSubscriptionRecoveryPaths(req, role)) return true;
+  return false;
+}
 
 const protect = async (req, res, next) => {
   const token = req.headers.authorization?.split(" ")[1];
@@ -39,10 +69,21 @@ const protect = async (req, res, next) => {
     if (user.role !== "admin") {
       const schoolId = await resolveSchoolIdForUser(user);
       if (schoolId && (await isSchoolSubscriptionSuspended(schoolId))) {
-        return res.status(403).json({
-          message: "Subscription expired. Please renew to continue.",
-          code: "SUBSCRIPTION_SUSPENDED",
-        });
+        if (!bypassesSchoolBillingBlock(req, user.role)) {
+          return res.status(403).json({
+            message: "Subscription expired. Please renew to continue.",
+            code: "SUBSCRIPTION_SUSPENDED",
+          });
+        }
+      }
+      if (schoolId) {
+        const billing = await getSchoolBillingAccess(schoolId);
+        if (!billing.allowed && !bypassesSchoolBillingBlock(req, user.role)) {
+          return res.status(403).json({
+            message: billing.message,
+            code: billing.code,
+          });
+        }
       }
     }
 
