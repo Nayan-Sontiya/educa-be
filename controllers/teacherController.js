@@ -1,49 +1,128 @@
 const { default: mongoose } = require("mongoose");
+const jwt = require("jsonwebtoken");
 const Teacher = require("../models/Teacher");
 const User = require("../models/User");
+const Subject = require("../models/Subject");
 const bcrypt = require("bcryptjs");
+const { normalizePhone, pickPhoneFromBody } = require("../utils/phone");
+
+function escapeRegex(str) {
+  return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 // 🧾 1️⃣ Teacher self-register
 exports.registerTeacher = async (req, res) => {
   try {
-    const { name, email, password, schoolId, subjectIds } = req.body;
+    const { name, email, password, schoolId, subjectIds, subject } = req.body;
+    const phoneRaw = pickPhoneFromBody(req.body);
 
-    const existingUser = await User.findOne({ email });
+    if (!name?.trim() || !email?.trim() || !password) {
+      return res.status(400).json({ message: "Name, email, and password are required" });
+    }
+    if (!schoolId) {
+      return res.status(400).json({ message: "School is required" });
+    }
+    if (!phoneRaw) {
+      return res.status(400).json({ message: "Phone number is required" });
+    }
+
+    const existingUser = await User.findOne({ email: email.trim() });
     if (existingUser)
       return res.status(400).json({ message: "Email already registered" });
 
-    // Encrypt password
     const hash = await bcrypt.hash(password, 10);
-
-    // Create a teacher user
-    const user = await User.create({
-      name,
-      email,
+    const pn = normalizePhone(phoneRaw);
+    const userPayload = {
+      name: name.trim(),
+      email: email.trim(),
       password: hash,
       role: "teacher",
       schoolId,
-    });
+      phone: phoneRaw,
+      ...(pn ? { phoneNormalized: pn } : {}),
+    };
 
-    // Create teacher profile in pending state
+    const user = await User.create(userPayload);
+
+    let resolvedSubjectIds = Array.isArray(subjectIds) ? subjectIds : [];
+    if (
+      resolvedSubjectIds.length === 0 &&
+      subject != null &&
+      String(subject).trim() !== "" &&
+      schoolId
+    ) {
+      const subDoc = await Subject.findOne({
+        schoolId,
+        name: new RegExp(`^${escapeRegex(String(subject).trim())}$`, "i"),
+      })
+        .select("_id")
+        .lean();
+      if (subDoc) resolvedSubjectIds = [subDoc._id];
+    }
+
     const teacher = await Teacher.create({
       userId: user._id,
       schoolId,
-      subjectIds: subjectIds || [],
+      subjectIds: resolvedSubjectIds,
+      phone: phoneRaw,
     });
 
-    res.status(201).json({
+    const userResponse = {
+      id: user._id.toString(),
+      _id: user._id.toString(),
+      name: user.name,
+      email: user.email,
+      phone: user.phone,
+      role: user.role,
+      schoolId: user.schoolId,
+      createdAt: user.createdAt,
+      teacherStatus: teacher.status,
+    };
+
+    const body = {
       message: "Teacher registered successfully, pending approval",
+      user: userResponse,
       teacher,
-    });
+    };
+
+    // Only active teachers may receive a session (e.g. added by school admin as active).
+    // Self-service signup is pending until an admin approves — no JWT.
+    if (teacher.status === "active") {
+      body.token = jwt.sign(
+        { id: user._id, role: user.role, schoolId: user.schoolId },
+        process.env.JWT_SECRET,
+        { expiresIn: "1d" }
+      );
+    }
+
+    res.status(201).json(body);
   } catch (error) {
-    res.status(500).json({ message: "Error registering teacher", error });
+    console.error("registerTeacher:", error?.message || error);
+    if (error?.name === "ValidationError") {
+      const errors = Object.values(error.errors || {}).map((e) => e.message);
+      return res.status(400).json({
+        message: errors[0] || "Validation failed",
+        errors,
+      });
+    }
+    if (error?.name === "CastError") {
+      return res.status(400).json({ message: "Invalid school or reference id" });
+    }
+    if (error?.code === 11000) {
+      return res.status(400).json({ message: "Email or username already registered" });
+    }
+    res.status(500).json({
+      message: "Error registering teacher",
+      details: error?.message || String(error),
+    });
   }
 };
 
 // 🧾 0️⃣ Add Teacher by School Admin
 exports.addTeacherBySchoolAdmin = async (req, res) => {
   try {
-    const { name, email, subjectIds, status, phone } = req.body;
+    const { name, email, subjectIds, status } = req.body;
+    const phoneRaw = pickPhoneFromBody(req.body);
 
     if (!name || !email)
       return res.status(400).json({ message: "Name and email are required" });
@@ -59,21 +138,28 @@ exports.addTeacherBySchoolAdmin = async (req, res) => {
     // Generate temporary password (optional)
     const tempPassword = Math.random().toString(36).slice(2, 10); // 8-char password
 
-    // Create user
-    const user = await User.create({
+    const userPayload = {
       name,
       email,
       password: tempPassword,
       role: "teacher",
       schoolId,
-    });
+    };
+    if (phoneRaw) {
+      userPayload.phone = phoneRaw;
+      const pn = normalizePhone(phoneRaw);
+      if (pn) userPayload.phoneNormalized = pn;
+    }
+
+    // Create user
+    const user = await User.create(userPayload);
 
     // Create teacher profile (direct approved)
     const teacher = await Teacher.create({
       userId: user._id,
       schoolId,
       subjectIds: subjectIds || [],
-      phone,
+      phone: phoneRaw || undefined,
       status,
     });
 
@@ -110,29 +196,37 @@ exports.updateTeacher = async (req, res) => {
       }
     }
 
-    // Step 3: Update User fields
+    // Step 3–4: Build User + Teacher updates (keep User.phone in sync with Teacher.phone)
     const userUpdates = {};
+    const teacherUpdates = {};
     if (name) userUpdates.name = name;
     if (email) userUpdates.email = email;
     if (password) {
       const hash = await bcrypt.hash(password, 10);
       userUpdates.password = hash; // 🔐 Hash password if provided
     }
-
-    await User.findByIdAndUpdate(userId, userUpdates);
-
-    // Step 4: Update Teacher fields
-    const teacherUpdates = {};
-    if (phone !== undefined) teacherUpdates.phone = phone;
+    if (phone !== undefined) {
+      const trimmed =
+        phone == null || String(phone).trim() === ""
+          ? undefined
+          : String(phone).trim();
+      teacherUpdates.phone = trimmed;
+      userUpdates.phone = trimmed;
+      userUpdates.phoneNormalized = trimmed
+        ? normalizePhone(trimmed) || undefined
+        : undefined;
+    }
     if (subjectIds !== undefined) teacherUpdates.subjectIds = subjectIds;
     if (status) teacherUpdates.status = status;
 
-    const updatedTeacher = await Teacher.findByIdAndUpdate(
-      teacherId,
-      teacherUpdates,
-      { new: true }
-    )
-      .populate("userId", "name email role")
+    await User.findByIdAndUpdate(userId, userUpdates);
+
+    const teacherQuery =
+      Object.keys(teacherUpdates).length > 0
+        ? Teacher.findByIdAndUpdate(teacherId, teacherUpdates, { new: true })
+        : Teacher.findById(teacherId);
+    const updatedTeacher = await teacherQuery
+      .populate("userId", "name email role phone")
       .populate("subjectIds", "name");
 
     res.json({
@@ -150,7 +244,7 @@ exports.getAllTeachers = async (req, res) => {
   try {
     const schoolId = new mongoose.Types.ObjectId(req.user.schoolId);
     const teachers = await Teacher.find({ schoolId })
-      .populate("userId", "name email role")
+      .populate("userId", "name email role phone")
       .populate("schoolId", "name")
       .populate("subjectIds", "name");
 
@@ -167,7 +261,7 @@ exports.getAllTeachers = async (req, res) => {
       subjects: t.subjectIds?.map((s) => s.name).join(", ") || "",
       createdAt: t.createdAt,
       updatedAt: t.updatedAt,
-      phone: t.phone,
+      phone: t.userId?.phone || t.phone,
     }));
 
     res.status(200).json({
@@ -191,15 +285,23 @@ exports.updateTeacherStatus = async (req, res) => {
       return res.status(400).json({ message: "Invalid status" });
     }
 
+    const dbStatus = status === "approved" ? "active" : "rejected";
+
     const teacher = await Teacher.findByIdAndUpdate(
       req.params.id,
-      { status },
+      { status: dbStatus },
       { new: true }
-    ).populate("userId", "name email role");
+    ).populate("userId", "name email role phone");
 
     if (!teacher) return res.status(404).json({ message: "Teacher not found" });
 
-    res.json({ message: `Teacher ${status} successfully`, teacher });
+    res.json({
+      message:
+        status === "approved"
+          ? "Teacher approved successfully"
+          : "Teacher rejected successfully",
+      teacher,
+    });
   } catch (error) {
     res.status(500).json({ message: "Error updating teacher status" });
   }
@@ -209,7 +311,7 @@ exports.updateTeacherStatus = async (req, res) => {
 exports.getMyProfile = async (req, res) => {
   try {
     const teacher = await Teacher.findOne({ userId: req.user.id })
-      .populate("userId", "name email role")
+      .populate("userId", "name email role phone")
       .populate("schoolId", "name");
 
     if (!teacher) return res.status(404).json({ message: "Profile not found" });

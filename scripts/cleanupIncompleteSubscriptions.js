@@ -22,7 +22,7 @@ async function main() {
   await mongoose.connect(uri);
 
   const filter = {
-    status: "incomplete",
+    status: "inactive",
     $or: [
       { stripeSubscriptionId: { $exists: false } },
       { stripeSubscriptionId: null },

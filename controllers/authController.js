@@ -10,6 +10,7 @@ const {
   getSchoolBillingAccess,
 } = require("../utils/subscriptionAccess");
 const { normalizePhone } = require("../utils/phone");
+const { normalizeUsername } = require("../utils/username");
 const Teacher = require("../models/Teacher");
 
 exports.registerUser = async (req, res) => {
@@ -32,8 +33,9 @@ exports.registerUser = async (req, res) => {
       return res.status(400).json({ message: "Email is required for this role" });
     }
 
+    const normalizedUsername = username ? normalizeUsername(username) : "";
     // For parent/student roles, username is required
-    if ((role === "parent" || role === "student") && !username) {
+    if ((role === "parent" || role === "student") && !normalizedUsername) {
       return res.status(400).json({ message: "Username is required for this role" });
     }
 
@@ -45,9 +47,9 @@ exports.registerUser = async (req, res) => {
       }
     }
 
-    // Check if user already exists by username (if username provided)
-    if (username) {
-      const existsByUsername = await User.findOne({ username });
+    // Usernames are globally unique (all schools); compare canonical form
+    if (normalizedUsername) {
+      const existsByUsername = await User.findOne({ username: normalizedUsername });
       if (existsByUsername) {
         return res.status(409).json({ message: "A user with this username already exists" });
       }
@@ -66,8 +68,7 @@ exports.registerUser = async (req, res) => {
     // Add email if provided (required for non-parent/student)
     if (email) userData.email = email;
     
-    // Add username if provided (required for parent/student)
-    if (username) userData.username = username;
+    if (normalizedUsername) userData.username = normalizedUsername;
 
     // Add optional fields
     if (phone) {
@@ -160,7 +161,8 @@ exports.loginUser = async (req, res) => {
     if (email.includes("@")) {
       user = await User.findOne({ email });
     } else {
-      user = await User.findOne({ username: email });
+      const un = normalizeUsername(email);
+      user = un ? await User.findOne({ username: un }) : null;
     }
 
     if (!user) return res.status(400).json({ message: "Invalid credentials" });
@@ -243,6 +245,9 @@ exports.loginUser = async (req, res) => {
       role: user.role,
       isBlocked: user.isBlocked === true,
     };
+    if (user.role === "teacher") {
+      userResponse.teacherStatus = "active";
+    }
 
     res.json({ 
       success: true,

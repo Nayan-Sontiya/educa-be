@@ -57,7 +57,7 @@ exports.patchSchoolSubscription = async (req, res) => {
 
     let sub = await SchoolSubscription.findOne({ schoolId });
     if (!sub) {
-      sub = new SchoolSubscription({ schoolId, status: "incomplete" });
+      sub = new SchoolSubscription({ schoolId, status: "inactive" });
     }
 
     if (adminUnblockUntil !== undefined) {
@@ -66,7 +66,7 @@ exports.patchSchoolSubscription = async (req, res) => {
     if (adminNote !== undefined) sub.adminNote = adminNote;
     if (
       forceStatus &&
-      ["active", "trialing", "suspended", "canceled", "incomplete"].includes(forceStatus)
+      ["active", "trialing", "inactive"].includes(forceStatus)
     ) {
       sub.status = forceStatus;
     }

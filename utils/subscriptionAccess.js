@@ -51,8 +51,8 @@ async function isSchoolSubscriptionSuspended(schoolId) {
   if (sub.adminUnblockUntil && new Date(sub.adminUnblockUntil) > new Date()) {
     return false;
   }
-  // Immediate block when not in good standing (legacy grace/past_due rows included).
-  return ["suspended", "canceled", "grace", "past_due"].includes(sub.status);
+  // Immediate block when not in good standing.
+  return sub.status === "inactive";
 }
 
 /**

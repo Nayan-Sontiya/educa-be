@@ -5,6 +5,7 @@ const protect = require("../middleware/authMiddleware");
 const roleCheck = require("../middleware/roleMiddleware");
 const {
   addStudentToClass,
+  suggestUsernames,
   lookupLinkableStudents,
   linkExistingStudentToClass,
   getStudentsForClassSection,
@@ -33,6 +34,9 @@ const upload = multer({
     }
   },
 });
+
+// ─── Username suggestions ──────────────────────────────────────────────────────
+router.post("/suggest-username", protect, roleCheck(["teacher", "school_admin"]), suggestUsernames);
 
 // ─── Link flow ────────────────────────────────────────────────────────────────
 router.post("/link/lookup", protect, roleCheck(["teacher", "school_admin"]), lookupLinkableStudents);

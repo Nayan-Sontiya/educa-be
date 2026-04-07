@@ -1,6 +1,7 @@
 // models/User.js
 const mongoose = require("mongoose");
 const { normalizePhone } = require("../utils/phone");
+const { normalizeUsername } = require("../utils/username");
 
 const userSchema = new mongoose.Schema(
   {
@@ -27,7 +28,7 @@ const userSchema = new mongoose.Schema(
         message: "Please provide a valid email address",
       },
     },
-    // Username: unique when present, required for parent/student, optional for others
+    // Username: globally unique when present (sparse index — not scoped by school)
     username: {
       type: String,
       unique: true,
@@ -115,9 +116,12 @@ userSchema.pre('save', function (next) {
   if (this.email === null || this.email === '') {
     this.email = undefined;
   }
-  // Convert null to undefined for username
-  if (this.username === null || this.username === '') {
+  // Username: empty → undefined; otherwise canonical form (trim + lowercase) for global uniqueness
+  if (this.username === null || this.username === "") {
     this.username = undefined;
+  } else {
+    const n = normalizeUsername(this.username);
+    this.username = n || undefined;
   }
   if (this.isModified("phone")) {
     const n = normalizePhone(this.phone);

@@ -50,11 +50,9 @@ async function countActiveStudents(schoolId) {
   });
 }
 
-/** API + webhooks use "trialing" in Mongo; legacy "active" rows still read as trialing for clients. */
+/** Normalize DB/webhook status for API clients. */
 function subscriptionStatusForClient(raw) {
-  if (!raw) return "none";
-  if (raw === "active") return "trialing";
-  return raw;
+  return raw || "inactive";
 }
 
 function webAppBase() {
@@ -231,7 +229,7 @@ exports.createCheckoutSession = async (req, res) => {
         billingMode: "per_seat",
         billedStudentCount: studentCount,
         pricePerStudentYearInr: billing.pricePerStudentYearInr,
-        status: "incomplete",
+        status: "inactive",
         stripePriceId: priceId,
       });
     } else {
@@ -425,14 +423,21 @@ exports.getSubscriptionStatus = async (req, res) => {
     let lastPaymentAt = sub?.lastPaymentAt;
     let billingMode = sub?.billingMode || null;
 
-    if (maskStaleMongoSub) {
+    if (trialAccess.inTrial) {
+      statusOut = "trialing";
+    } else if (maskStaleMongoSub) {
       plan = null;
-      statusOut = "none";
+      statusOut = "inactive";
       currentPeriodStart = undefined;
       currentPeriodEnd = undefined;
       graceEndsAt = undefined;
       lastPaymentAt = undefined;
       billingMode = null;
+    } else if (!sub?.status) {
+      statusOut = "inactive";
+    }
+    if (!trialAccess.inTrial && ["none", "inactive"].includes(statusOut)) {
+      statusOut = "inactive";
     }
 
     const amountPaise =
@@ -576,8 +581,8 @@ async function handleInvoicePaid(stripe, invoice, fallbackSchoolId) {
   const subDoc = await SchoolSubscription.findOne({ schoolId });
   if (!subDoc) return;
 
-  // Product convention at launch: persist good-standing subs as "trialing" (not "active") in Mongo.
-  subDoc.status = "trialing";
+  // Paid invoice => paid subscription in good standing.
+  subDoc.status = "active";
   subDoc.stripeSubscriptionId = stripeSub.id;
   const cust = stripeSub.customer;
   subDoc.stripeCustomerId = typeof cust === "string" ? cust : cust?.id;
@@ -602,7 +607,7 @@ async function handleInvoicePaymentFailed(stripe, invoice) {
   const subDoc = await SchoolSubscription.findOne({ schoolId });
   if (!subDoc) return;
 
-  subDoc.status = "suspended";
+  subDoc.status = "inactive";
   subDoc.graceStartedAt = undefined;
   subDoc.graceEndsAt = undefined;
   subDoc.graceReminderDay = undefined;
@@ -627,24 +632,24 @@ async function handleSubscriptionUpdated(stripeSub, fallbackSchoolId) {
   if (!subDoc) return;
 
   if (stripeSub.status === "active" || stripeSub.status === "trialing") {
-    subDoc.status = "trialing";
+    subDoc.status = "active";
     subDoc.currentPeriodStart = new Date(stripeSub.current_period_start * 1000);
     subDoc.currentPeriodEnd = new Date(stripeSub.current_period_end * 1000);
     subDoc.graceEndsAt = undefined;
     subDoc.graceStartedAt = undefined;
     subDoc.graceReminderDay = undefined;
   } else if (stripeSub.status === "past_due") {
-    subDoc.status = "suspended";
+    subDoc.status = "inactive";
     subDoc.graceStartedAt = undefined;
     subDoc.graceEndsAt = undefined;
     subDoc.graceReminderDay = undefined;
   } else if (stripeSub.status === "unpaid") {
-    subDoc.status = "suspended";
+    subDoc.status = "inactive";
     subDoc.graceStartedAt = undefined;
     subDoc.graceEndsAt = undefined;
     subDoc.graceReminderDay = undefined;
   } else if (stripeSub.status === "canceled") {
-    subDoc.status = "canceled";
+    subDoc.status = "inactive";
     subDoc.canceledAt = new Date();
   }
 
@@ -693,11 +698,6 @@ exports.confirmCheckoutSession = async (req, res) => {
       expand: ["subscription", "subscription.latest_invoice"],
     });
 
-    const metaSchool = session.metadata?.schoolId;
-    if (!metaSchool || metaSchool !== String(user.schoolId)) {
-      return res.status(403).json({ message: "This checkout session does not belong to your school" });
-    }
-
     if (session.mode !== "subscription") {
       return res.status(400).json({ message: "Not a subscription checkout" });
     }
@@ -712,17 +712,25 @@ exports.confirmCheckoutSession = async (req, res) => {
         ? await stripe.subscriptions.retrieve(subRef, { expand: ["latest_invoice"] })
         : subRef;
 
+    const userSchoolId = String(user.schoolId);
+    const sessionSchoolId = session.metadata?.schoolId ? String(session.metadata.schoolId) : null;
+    const subSchoolId = stripeSub.metadata?.schoolId ? String(stripeSub.metadata.schoolId) : null;
+    const resolvedSchoolId = sessionSchoolId || subSchoolId;
+    if (!resolvedSchoolId || resolvedSchoolId !== userSchoolId) {
+      return res.status(403).json({ message: "This checkout session does not belong to your school" });
+    }
+
     if (session.payment_status === "paid") {
       const li = stripeSub.latest_invoice;
       if (li) {
         const inv = typeof li === "string" ? await stripe.invoices.retrieve(li) : li;
         if (inv?.status === "paid" && inv.subscription) {
-          await handleInvoicePaid(stripe, inv, metaSchool);
+          await handleInvoicePaid(stripe, inv, resolvedSchoolId);
         }
       }
     }
 
-    await handleSubscriptionUpdated(stripeSub, metaSchool);
+    await handleSubscriptionUpdated(stripeSub, resolvedSchoolId);
 
     const refreshed = await SchoolSubscription.findOne({ schoolId: user.schoolId }).lean();
     return res.json({
@@ -848,4 +856,40 @@ exports.runSubscriptionReminderJobs = async () => {
       });
     }
   }
+};
+
+/**
+ * Used by cron — converts school trial rows to inactive once school trial window ends.
+ * This is an explicit DB sync so status is visible in Mongo even before any API read.
+ */
+exports.runTrialExpiryStatusSyncJob = async () => {
+  const subs = await SchoolSubscription.find({ status: "trialing" })
+    .select("schoolId status")
+    .lean();
+
+  if (!subs.length) return { scanned: 0, changed: 0 };
+
+  const schoolIds = subs.map((s) => s.schoolId);
+  const schools = await School.find({ _id: { $in: schoolIds } })
+    .select("_id verificationStatus verifiedAt createdAt")
+    .lean();
+  const bySchoolId = new Map(schools.map((s) => [String(s._id), s]));
+
+  let changed = 0;
+  const nowMs = Date.now();
+
+  for (const sub of subs) {
+    const school = bySchoolId.get(String(sub.schoolId));
+    const trialEnds = trialEndsAtFromSchool(school);
+    if (!school || school.verificationStatus !== "Verified" || !trialEnds) continue;
+    if (trialEnds.getTime() > nowMs) continue;
+
+    await SchoolSubscription.updateOne(
+      { _id: sub._id, status: "trialing" },
+      { $set: { status: "inactive" } }
+    );
+    changed += 1;
+  }
+
+  return { scanned: subs.length, changed };
 };

@@ -2,6 +2,7 @@ const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
 const User = require("../models/User");
 const { normalizePhone } = require("../utils/phone");
+const { normalizeUsername } = require("../utils/username");
 const {
   assignOtpToUser,
   verifyOtpOnUser,
@@ -68,7 +69,7 @@ async function findUserByMobile(mobile) {
 }
 
 async function findUserByUsername(username) {
-  const uname = String(username || "").trim();
+  const uname = normalizeUsername(username);
   if (!uname) return null;
   return User.findOne({ username: uname });
 }

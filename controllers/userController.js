@@ -2,7 +2,9 @@
 const mongoose = require("mongoose");
 const bcrypt = require("bcryptjs");
 const User = require("../models/User");
+const Teacher = require("../models/Teacher");
 const { normalizePhone } = require("../utils/phone");
+const { normalizeUsername } = require("../utils/username");
 const { resolveSchoolIdForUser } = require("../utils/resolveSchoolId");
 const { getSchoolBillingAccess } = require("../utils/subscriptionAccess");
 
@@ -66,6 +68,10 @@ exports.getCurrentUser = async (req, res) => {
           accessBlocked: !billing.allowed,
         };
       }
+    }
+    if (user.role === "teacher") {
+      const t = await Teacher.findOne({ userId: user._id }).select("status").lean();
+      payload.teacherStatus = t?.status ?? null;
     }
     res.json(payload);
   } catch (error) {
@@ -463,7 +469,7 @@ exports.adminPatchUser = async (req, res) => {
       patch.email = e || undefined;
     }
     if (username !== undefined) {
-      const u = String(username || "").trim();
+      const u = normalizeUsername(username);
       patch.username = u || undefined;
     }
     if (phone !== undefined) {

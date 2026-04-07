@@ -98,7 +98,7 @@ async function main() {
       { schoolId: { $in: schoolIds } },
       {
         $set: {
-          status: "incomplete",
+          status: "inactive",
           billedStudentCount: 0,
         },
         $unset: {

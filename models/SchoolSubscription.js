@@ -2,13 +2,9 @@ const mongoose = require("mongoose");
 
 const PLAN_ENUM = ["monthly", "quarterly", "yearly", "custom"];
 const STATUS_ENUM = [
-  "incomplete", // checkout not finished
-  "trialing", // Stripe subscription trialing (shown in app; good standing)
-  "active",
-  "past_due", // Stripe past_due or unpaid invoice
-  "grace", // legacy only — migrate away; treated like suspended for access
-  "suspended", // API access blocked
-  "canceled",
+  "trialing", // school approval trial window (4 weeks)
+  "active", // paid subscription in good standing
+  "inactive", // payment required / no valid subscription after trial
 ];
 
 const schoolSubscriptionSchema = new mongoose.Schema(
@@ -29,7 +25,7 @@ const schoolSubscriptionSchema = new mongoose.Schema(
     /** Active students at last successful invoice / checkout */
     billedStudentCount: { type: Number, default: 0, min: 0 },
     pricePerStudentYearInr: { type: Number, default: 300 },
-    status: { type: String, enum: STATUS_ENUM, default: "incomplete" },
+    status: { type: String, enum: STATUS_ENUM, default: "inactive" },
     stripeCustomerId: { type: String, trim: true },
     stripeSubscriptionId: { type: String, trim: true },
     stripePriceId: { type: String, trim: true },

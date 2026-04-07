@@ -11,6 +11,7 @@ const School = require("../models/School");
 const { sendSms } = require("../utils/smsService");
 const { uploadBuffer } = require("../utils/cloudinary");
 const { analyzePortfolio, getWeekNumber } = require("../utils/aiAnalysis");
+const { normalizeUsername, suggestAvailableUsernames } = require("../utils/username");
 const {
   resolvePortfolioForStudent,
   portfolioEntryCount,
@@ -71,7 +72,9 @@ const loadSchoolsById = async (schoolIds) => {
 };
 
 const verifyParentCredentialsByUsername = async (parentUsername, parentPassword) => {
-  const parentUser = await User.findOne({ role: "parent", username: parentUsername });
+  const u = normalizeUsername(parentUsername);
+  if (!u) return null;
+  const parentUser = await User.findOne({ role: "parent", username: u });
   if (!parentUser) return null;
   const match = await bcrypt.compare(parentPassword, parentUser.password);
   if (!match) return null;
@@ -91,7 +94,8 @@ exports.addStudentToClass = async (req, res) => {
       parentPassword,
     } = req.body;
 
-    if (!classSectionId || !studentName || !parentPassword || !parentUsername) {
+    const parentUserUsername = normalizeUsername(parentUsername);
+    if (!classSectionId || !studentName || !parentPassword || !parentUserUsername) {
       return res.status(400).json({
         message:
           "classSectionId, studentName, parentUsername and parentPassword are required",
@@ -120,12 +124,18 @@ exports.addStudentToClass = async (req, res) => {
         .json({ message: "You are not allowed to add students to this class" });
     }
 
-    // Add flow: parent username must be unique. Reuse/link is done via Link flow only.
-    const usernameTaken = await User.findOne({ username: parentUsername });
+    // Add flow: username must be globally unique (any school). Reuse/link is done via Link flow only.
+    const usernameTaken = await User.findOne({ username: parentUserUsername });
     if (usernameTaken) {
+      const suggestions = await suggestAvailableUsernames(
+        User,
+        studentName,
+        parentName,
+        parentPhone,
+      );
       return res.status(409).json({
-        message:
-          "This username is already registered. Use 'Link' to add this student with existing credentials.",
+        message: "This username is already taken. Please choose a different one.",
+        suggestions,
       });
     }
 
@@ -138,7 +148,7 @@ exports.addStudentToClass = async (req, res) => {
     const hash = await bcrypt.hash(parentPassword, 10);
     const parentUser = await User.create({
       name: parentName || `${studentName}'s Parent`,
-      username: parentUsername,
+      username: parentUserUsername,
       phone: parentPhone,
       password: hash,
       role: "parent",
@@ -192,11 +202,12 @@ exports.addStudentToClass = async (req, res) => {
     // }
 
     res.status(201).json({
-      message: "Student and parent account created successfully",
+      message: "Student account created successfully",
       student,
       parent: {
         id: parentUser._id,
         name: parentUser.name,
+        username: parentUser.username,
         email: parentUser.email,
         phone: parentUser.phone,
       },
@@ -224,11 +235,17 @@ exports.addStudentToClass = async (req, res) => {
         });
       }
       
-      // Handle username duplicate (Add requires unique username; use Link for existing)
+      // Handle username duplicate
       if (keyPattern.username && keyValue.username) {
+        const suggestions = await suggestAvailableUsernames(
+          User,
+          req.body.studentName,
+          req.body.parentName,
+          req.body.parentPhone,
+        );
         return res.status(409).json({
-          message:
-            "This username is already registered. Use 'Link' to add this student with existing credentials.",
+          message: "This username is already taken. Please choose a different one.",
+          suggestions,
         });
       }
       
@@ -263,6 +280,24 @@ exports.addStudentToClass = async (req, res) => {
       message: "Error adding student to class",
       error: process.env.NODE_ENV === 'development' ? error.message : undefined,
     });
+  }
+};
+
+// Suggest available usernames based on student/parent name + phone
+exports.suggestUsernames = async (req, res) => {
+  try {
+    const { studentName, parentName, phone } = req.body;
+    const suggestions = await suggestAvailableUsernames(
+      User,
+      studentName || "",
+      parentName || "",
+      phone || "",
+      8,
+    );
+    res.json({ suggestions });
+  } catch (error) {
+    console.error("suggestUsernames error:", error);
+    res.status(500).json({ message: "Error generating suggestions" });
   }
 };
 
@@ -525,7 +560,7 @@ exports.getStudentsForClassSection = async (req, res) => {
     }
 
     const students = await Student.find({ classSectionId, status: "active" })
-      .populate("parentUserId", "name")
+      .populate("parentUserId", "name username")
       .select("name rollNumber classSectionId parentUserId")
       .sort({ createdAt: 1 });
 
@@ -534,6 +569,7 @@ exports.getStudentsForClassSection = async (req, res) => {
       name: s.name,
       rollNumber: s.rollNumber,
       parentName: s.parentUserId?.name || "",
+      parentUsername: s.parentUserId?.username || "",
     }));
 
     res.json({ data: formatted });
