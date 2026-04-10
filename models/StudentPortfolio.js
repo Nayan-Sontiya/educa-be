@@ -41,6 +41,8 @@ const behaviorEntrySchema = new mongoose.Schema(
     schoolId: { type: mongoose.Schema.Types.ObjectId, ref: "School", index: true },
     weekNumber: { type: Number },
     date: { type: Date, default: Date.now },
+    /** When the teacher saved this entry (display); `date` is week anchor for the record */
+    recordedAt: { type: Date },
     // discipline is a legacy free-text field — no enum to stay backward compatible
     discipline: { type: String, trim: true },
     // New structured rating fields (lowercase enum)
@@ -82,6 +84,7 @@ const wellbeingEntrySchema = new mongoose.Schema(
     schoolId: { type: mongoose.Schema.Types.ObjectId, ref: "School", index: true },
     weekNumber: { type: Number },
     date: { type: Date, default: Date.now },
+    recordedAt: { type: Date },
     status: {
       type: String,
       enum: ["happy_engaged", "neutral", "low_withdrawn"],

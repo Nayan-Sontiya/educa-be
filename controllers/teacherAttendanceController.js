@@ -2,6 +2,7 @@
 const TeacherAttendance = require("../models/TeacherAttendance");
 const Teacher = require("../models/Teacher");
 const School = require("../models/School");
+const Leave = require("../models/Leave");
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -180,14 +181,39 @@ exports.getAttendanceForAdmin = async (req, res) => {
 
     const recordMap = new Map(records.map((r) => [r.teacherId.toString(), r]));
 
+    // Approved leave overlapping this calendar day → show Leave (unless they checked in Present)
+    const onLeaveTeacherIds = new Set();
+    if (schoolId) {
+      const approvedLeaves = await Leave.find({
+        schoolId,
+        status: "approved",
+        startDate: { $lte: endOfDay },
+        endDate: { $gte: startOfDay },
+      })
+        .select("teacherId")
+        .lean();
+      for (const lv of approvedLeaves) {
+        onLeaveTeacherIds.add(lv.teacherId.toString());
+      }
+    }
+
     const data = teachers.map((t) => {
-      const record = recordMap.get(t._id.toString());
+      const tid = t._id.toString();
+      const record = recordMap.get(tid);
+      const checkedInPresent = record?.status === "P";
+      const onApprovedLeave = onLeaveTeacherIds.has(tid);
+
+      let status = record?.status || "A";
+      if (!checkedInPresent && onApprovedLeave) {
+        status = "L";
+      }
+
       return {
         teacherId: t._id,
         teacherName: t.userId?.name || "—",
         teacherEmail: t.userId?.email || "—",
         date: targetDate,
-        status: record?.status || "A",
+        status,
         checkInTime: record?.checkInTime || null,
         selfieUrl: record?.selfieUrl || null,
         location: record?.location || null,
@@ -215,22 +241,48 @@ exports.markAbsentAll = async (schoolId) => {
     const filter = schoolId ? { schoolId, status: "active" } : { status: "active" };
     const teachers = await Teacher.find(filter).select("_id schoolId").lean();
 
+    const teacherIds = teachers.map((t) => t._id);
+    let onLeaveIds = new Set();
+    if (teacherIds.length > 0) {
+      const leaveRows = await Leave.find({
+        teacherId: { $in: teacherIds },
+        status: "approved",
+        startDate: { $lte: endOfDay },
+        endDate: { $gte: startOfDay },
+      })
+        .select("teacherId")
+        .lean();
+      onLeaveIds = new Set(leaveRows.map((l) => l.teacherId.toString()));
+    }
+
     let count = 0;
     for (const t of teachers) {
       const existing = await TeacherAttendance.findOne({
         teacherId: t._id,
         date: { $gte: startOfDay, $lte: endOfDay },
       });
-      if (!existing) {
+      if (existing) continue;
+
+      if (onLeaveIds.has(t._id.toString())) {
         await TeacherAttendance.create({
           teacherId: t._id,
           schoolId: t.schoolId,
           date: today,
-          status: "A",
+          status: "L",
           markedBy: "auto",
         });
         count++;
+        continue;
       }
+
+      await TeacherAttendance.create({
+        teacherId: t._id,
+        schoolId: t.schoolId,
+        date: today,
+        status: "A",
+        markedBy: "auto",
+      });
+      count++;
     }
     console.log(`[Cron] Marked ${count} teacher(s) as Absent for ${today.toDateString()}`);
     return count;

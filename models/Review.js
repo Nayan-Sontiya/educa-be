@@ -82,10 +82,28 @@ reviewSchema.index({ schoolId: 1, rating: 1 });
 reviewSchema.index({ schoolId: 1, createdAt: -1 });
 reviewSchema.index({ schoolId: 1, status: 1, rating: 1 });
 
+/** Aggregation $match does not cast; JWT schoolId is often a string. */
+reviewSchema.statics.toSchoolObjectId = function (schoolId) {
+  if (!schoolId) return null;
+  if (schoolId instanceof mongoose.Types.ObjectId) return schoolId;
+  const s = String(schoolId);
+  if (mongoose.Types.ObjectId.isValid(s)) return new mongoose.Types.ObjectId(s);
+  return null;
+};
+
 // Static method to calculate average rating
 reviewSchema.statics.getAverageRating = async function (schoolId) {
+  const sid = this.toSchoolObjectId(schoolId);
+  if (!sid) {
+    return {
+      averageRating: 0,
+      totalReviews: 0,
+      ratingDistribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 },
+    };
+  }
+
   const result = await this.aggregate([
-    { $match: { schoolId, status: { $ne: "hidden" } } },
+    { $match: { schoolId: sid, status: { $ne: "hidden" } } },
     {
       $group: {
         _id: null,

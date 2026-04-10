@@ -29,6 +29,12 @@ const studentSchema = new mongoose.Schema(
       enum: ["active", "inactive"],
       default: "active",
     },
+    /** When school subscription is active: `included` counts toward paid seats; `pending_purchase` awaits admin proration checkout. */
+    seatBillingStatus: {
+      type: String,
+      enum: ["included", "pending_purchase"],
+      default: "included",
+    },
     schoolId: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "School",

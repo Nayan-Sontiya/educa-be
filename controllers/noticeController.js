@@ -1,6 +1,19 @@
 // controllers/noticeController.js
 const Notice = require("../models/Notice");
 const School = require("../models/School");
+const User = require("../models/User");
+const { resolveSchoolIdForUser } = require("../utils/resolveSchoolId");
+
+async function resolveSchoolIdForNotices(req) {
+  const dbUser = await User.findById(req.user.id);
+  if (dbUser) {
+    const resolved = await resolveSchoolIdForUser(dbUser);
+    if (resolved) return resolved;
+  }
+  const sid = req.user.schoolId;
+  if (!sid) return null;
+  return typeof sid === "object" && sid._id ? String(sid._id) : String(sid);
+}
 
 // Create a new notice
 const createNotice = async (req, res) => {
@@ -180,7 +193,7 @@ const getAllNotices = async (req, res) => {
 const getActiveNotices = async (req, res) => {
   try {
     const { classSectionId } = req.query;
-    const schoolId = req.user.schoolId;
+    const schoolId = await resolveSchoolIdForNotices(req);
 
     if (!schoolId) {
       return res.status(400).json({
@@ -195,7 +208,7 @@ const getActiveNotices = async (req, res) => {
 
     if (userRole === "teacher") {
       targetAudience = "Teachers Only";
-    } else if (userRole === "student") {
+    } else if (userRole === "student" || userRole === "parent") {
       targetAudience = "Students Only";
     }
 
@@ -232,7 +245,14 @@ const getActiveNotices = async (req, res) => {
 const getNoticeById = async (req, res) => {
   try {
     const { id } = req.params;
-    const schoolId = req.user.schoolId;
+    const schoolId = await resolveSchoolIdForNotices(req);
+
+    if (!schoolId) {
+      return res.status(400).json({
+        success: false,
+        message: "School ID is required",
+      });
+    }
 
     const notice = await Notice.findOne({ _id: id, schoolId })
       .populate("createdBy", "name email")

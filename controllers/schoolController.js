@@ -10,6 +10,8 @@ const udiseService = require("../utils/udiseService");
 const { createDefaultClasses } = require("../utils/createDefaultClasses");
 const { getRelativePath, getFileUrl, getFileUrls, convertDocumentsToUrls } = require("../utils/fileUrlHelper");
 const { normalizePhone } = require("../utils/phone");
+const { sendSms } = require("../utils/smsService");
+const SchoolRegistrationOtp = require("../models/SchoolRegistrationOtp");
 const {
   notifySchoolRegistered,
   notifySchoolStatusChanged,
@@ -38,7 +40,6 @@ exports.registerSchool = async (req, res) => {
       adminDesignation,
       adminEmail,
       adminMobile,
-      username,
       password,
     } = body;
 
@@ -47,14 +48,12 @@ exports.registerSchool = async (req, res) => {
       !name ||
       !udiseCode ||
       !affiliationBoard ||
-      !affiliationNumber ||
       !addressLine1 ||
       !city ||
       !pincode ||
       !adminName ||
       !adminEmail ||
       !adminMobile ||
-      !username ||
       !password
     ) {
       return res.status(400).json({ message: "Missing required fields" });
@@ -217,7 +216,7 @@ exports.getSchoolsForAdmin = async (req, res) => {
       q.verificationStatus = status;
     }
     const schools = await School.find(q)
-      .populate("createdBy", "name email phone role")
+      .populate("createdBy", "name email phone role username")
       .sort({ createdAt: -1 })
       .lean();
     res.json({
@@ -281,7 +280,7 @@ exports.getSchoolAdminSummary = async (req, res) => {
   try {
     const { schoolId } = req.params;
     const school = await School.findById(schoolId)
-      .populate("createdBy", "name email phone")
+      .populate("createdBy", "name email phone role username")
       .lean();
     if (!school) {
       return res.status(404).json({ success: false, message: "School not found" });
@@ -533,34 +532,111 @@ exports.getSchoolsWithReviews = async (req, res) => {
   }
 };
 
-// Dev: send OTP to mobile (stores OTP on school record or returns to client for dev)
+const SCHOOL_REG_OTP_TTL_MS = 10 * 60 * 1000;
+const SCHOOL_REG_OTP_MAX_ATTEMPTS = 5;
+
+/** POST /schools/send-otp — stores OTP server-side, sends SMS; never returns the code to the client */
 exports.sendOtp = async (req, res) => {
   try {
     const { mobile } = req.body;
-    if (!mobile) return res.status(400).json({ message: "Mobile is required" });
+    if (!mobile) {
+      return res.status(400).json({ message: "Mobile is required" });
+    }
+
+    const digits = normalizePhone(mobile);
+    if (digits.length < 10) {
+      return res.status(400).json({ message: "Enter a valid mobile number" });
+    }
+    const mobileNormalized = digits.slice(-10);
 
     const code = Math.floor(100000 + Math.random() * 900000).toString();
-    // In a real system, send SMS via provider and do not return the OTP.
+    const expiresAt = new Date(Date.now() + SCHOOL_REG_OTP_TTL_MS);
 
-    // store OTP in a temporary collection or a School document if school exists. For now return code in response.
-    res.json({ message: "OTP sent (dev)", code });
+    await SchoolRegistrationOtp.deleteMany({ mobileNormalized });
+    await SchoolRegistrationOtp.create({
+      mobileNormalized,
+      code,
+      expiresAt,
+      attempts: 0,
+    });
+
+    const smsText =
+      `Your UtthanAI school registration verification code is ${code}. Valid for 10 minutes. Do not share this code.`;
+
+    await sendSms(mobileNormalized, smsText);
+
+    if (!process.env.FAST2SMS_API_KEY) {
+      console.warn(
+        `[school registration OTP] FAST2SMS_API_KEY not set — SMS not sent. Stored OTP for ***${mobileNormalized.slice(-4)} (local/testing only; configure SMS for production).`,
+      );
+    }
+
+    return res.json({
+      message:
+        "If this number can receive SMS, a verification code has been sent. It may take up to a minute to arrive.",
+    });
   } catch (err) {
-    res.status(500).json({ message: "Error sending OTP" });
+    console.error("sendOtp:", err);
+    return res
+      .status(500)
+      .json({ message: "Could not send verification code. Try again later." });
   }
 };
 
-// Dev: verify OTP (stub)
+/** POST /schools/verify-otp — checks stored OTP, rate-limited attempts */
 exports.verifyOtp = async (req, res) => {
   try {
     const { mobile, otp } = req.body;
-    // In dev we accept any OTP of 6 digits. In production validate against stored code.
-    if (!mobile || !otp)
-      return res.status(400).json({ message: "Missing mobile or otp" });
-    if (!/^[0-9]{6}$/.test(otp))
-      return res.status(400).json({ message: "Invalid OTP" });
-    res.json({ message: "OTP verified" });
+    if (!mobile || !otp) {
+      return res
+        .status(400)
+        .json({ message: "Mobile number and verification code are required" });
+    }
+    const otpStr = String(otp).trim();
+    if (!/^[0-9]{6}$/.test(otpStr)) {
+      return res
+        .status(400)
+        .json({ message: "Enter the 6-digit code from your SMS" });
+    }
+
+    const digits = normalizePhone(mobile);
+    if (digits.length < 10) {
+      return res.status(400).json({ message: "Enter a valid mobile number" });
+    }
+    const mobileNormalized = digits.slice(-10);
+
+    const record = await SchoolRegistrationOtp.findOne({ mobileNormalized }).sort({
+      createdAt: -1,
+    });
+
+    if (!record || record.expiresAt < new Date()) {
+      return res.status(400).json({
+        message: "Code expired or not found. Request a new verification code.",
+      });
+    }
+
+    if (record.attempts >= SCHOOL_REG_OTP_MAX_ATTEMPTS) {
+      await SchoolRegistrationOtp.deleteOne({ _id: record._id });
+      return res.status(400).json({
+        message: "Too many incorrect attempts. Request a new verification code.",
+      });
+    }
+
+    if (record.code !== otpStr) {
+      await SchoolRegistrationOtp.updateOne(
+        { _id: record._id },
+        { $inc: { attempts: 1 } },
+      );
+      return res.status(400).json({ message: "Invalid verification code" });
+    }
+
+    await SchoolRegistrationOtp.deleteMany({ mobileNormalized });
+    return res.json({ message: "Mobile verified successfully" });
   } catch (err) {
-    res.status(500).json({ message: "Error verifying OTP" });
+    console.error("verifyOtp:", err);
+    return res
+      .status(500)
+      .json({ message: "Could not verify code. Try again." });
   }
 };
 

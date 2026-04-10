@@ -216,7 +216,23 @@ exports.updateReply = async (req, res) => {
 // Get review analytics
 exports.getReviewAnalytics = async (req, res) => {
   try {
-    const { schoolId } = req.user;
+    const { schoolId: rawSchoolId } = req.user;
+    const schoolId = Review.toSchoolObjectId(rawSchoolId);
+
+    if (!schoolId) {
+      return res.json({
+        success: true,
+        data: {
+          averageRating: 0,
+          totalReviews: 0,
+          ratingDistribution: { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 },
+          categoryDistribution: {},
+          trends: [],
+          newReviews: 0,
+          repliedReviews: 0,
+        },
+      });
+    }
 
     const stats = await Review.getAverageRating(schoolId);
 

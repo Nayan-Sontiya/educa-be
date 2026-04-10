@@ -122,19 +122,28 @@ noticeSchema.pre("save", function (next) {
 // Static method to find active notices for a school
 noticeSchema.statics.findActiveNotices = function (schoolId, targetAudience, classSectionId = null) {
   const now = new Date();
-  
-  // For "All" audience, return all notices with audience "All"
-  // For specific audiences, use OR condition to include both specific and "All"
-  let audienceQuery;
-  
+
+  const classIdValid =
+    classSectionId && mongoose.Types.ObjectId.isValid(String(classSectionId));
+
+  // Audience filter (combined with expiry via $and so a second $or does not overwrite expiry)
+  let audienceCondition;
+
   if (targetAudience === "All") {
-    audienceQuery = { targetAudience: "All" };
+    audienceCondition = { targetAudience: "All" };
   } else if (targetAudience === "Teachers Only") {
-    audienceQuery = { $or: [{ targetAudience: "All" }, { targetAudience: "Teachers Only" }] };
+    audienceCondition = { $or: [{ targetAudience: "All" }, { targetAudience: "Teachers Only" }] };
   } else if (targetAudience === "Students Only") {
-    audienceQuery = { $or: [{ targetAudience: "All" }, { targetAudience: "Students Only" }] };
-  } else if (targetAudience === "Specific Class" && classSectionId) {
-    audienceQuery = {
+    const ors = [{ targetAudience: "All" }, { targetAudience: "Students Only" }];
+    if (classIdValid) {
+      ors.push({
+        targetAudience: "Specific Class",
+        classSectionIds: classSectionId,
+      });
+    }
+    audienceCondition = { $or: ors };
+  } else if (targetAudience === "Specific Class" && classIdValid) {
+    audienceCondition = {
       $or: [
         { targetAudience: "All" },
         {
@@ -144,15 +153,17 @@ noticeSchema.statics.findActiveNotices = function (schoolId, targetAudience, cla
       ],
     };
   } else {
-    audienceQuery = { targetAudience: "All" };
+    audienceCondition = { targetAudience: "All" };
   }
 
   const query = {
     schoolId,
     status: "published",
     publishDate: { $lte: now },
-    $or: [{ expiryDate: null }, { expiryDate: { $gte: now } }],
-    ...audienceQuery,
+    $and: [
+      { $or: [{ expiryDate: null }, { expiryDate: { $gte: now } }] },
+      audienceCondition,
+    ],
   };
 
   return this.find(query)

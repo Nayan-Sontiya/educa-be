@@ -8,13 +8,19 @@ const {
   verifyOtpOnUser,
   clearOtp,
 } = require("../services/userOtpService");
+const { sendSms } = require("../utils/smsService");
+const { sendMail } = require("../utils/mail");
 
 const OTP_TTL_MS = 5 * 60 * 1000;
 const MAX_RESEND = 3;
 
 const GENERIC_SEND_OTP = {
-  message: "If this username is registered, an OTP has been sent.",
+  message: "If this account is registered, an OTP has been sent.",
 };
+
+function isEmail(value) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+}
 
 function generateCode() {
   return Math.floor(100000 + Math.random() * 900000).toString();
@@ -74,17 +80,44 @@ async function findUserByUsername(username) {
   return User.findOne({ username: uname });
 }
 
+async function findUserByEmail(email) {
+  if (!email) return null;
+  return User.findOne({ email: email.trim().toLowerCase() });
+}
+
+/**
+ * Resolve user from an identifier that is either an email address or a username.
+ * Returns { user, via } where via is 'email' or 'sms'.
+ */
+async function resolveUserFromIdentifier(identifier) {
+  const raw = String(identifier || "").trim();
+  if (!raw) return { user: null, via: null };
+
+  if (isEmail(raw)) {
+    const user = await findUserByEmail(raw);
+    return { user, via: "email" };
+  }
+
+  const user = await findUserByUsername(raw);
+  return { user, via: "sms" };
+}
+
 /** POST /api/auth/forgot-password/send-otp */
 exports.forgotPasswordSendOtp = async (req, res) => {
   try {
-    const { username } = req.body;
-    if (!username || String(username).trim().length < 3) {
-      return res.status(400).json({ message: "Please enter a valid username" });
+    // Accept `identifier` (new) or fall back to legacy `username` field
+    const identifier = req.body.identifier || req.body.username;
+    if (!identifier || String(identifier).trim().length < 3) {
+      return res.status(400).json({ message: "Please enter a valid email or username" });
     }
 
-    const user = await findUserByUsername(username);
+    const { user, via } = await resolveUserFromIdentifier(identifier);
+
+    // For email flow, user must have an email. For SMS flow, user must have a phone.
     const pn = user ? normalizePhone(user.phone) : "";
-    if (!user || !pn) {
+    const hasDeliveryChannel = via === "email" ? !!user?.email : !!pn;
+
+    if (!user || !hasDeliveryChannel) {
       return res.json(GENERIC_SEND_OTP);
     }
 
@@ -103,8 +136,9 @@ exports.forgotPasswordSendOtp = async (req, res) => {
       });
     }
 
+    const code = generateCode();
     user.authOtp = {
-      code: generateCode(),
+      code,
       expiresAt: new Date(Date.now() + OTP_TTL_MS),
       attempts: 3,
       resendCount,
@@ -113,12 +147,41 @@ exports.forgotPasswordSendOtp = async (req, res) => {
     await user.save();
 
     const body = { ...GENERIC_SEND_OTP };
-    body.maskedMobile = maskPhone(user.phone);
-    body.message = `OTP sent to ${body.maskedMobile}`;
-    if (process.env.NODE_ENV !== "production") {
-      body.code = user.authOtp?.code;
-      body.message = "OTP sent (dev). Use code to verify.";
+
+    if (via === "email") {
+      const maskedEmail = user.email.replace(/(.{2}).+(@.+)/, "$1***$2");
+      body.maskedEmail = maskedEmail;
+      body.message = `OTP sent to ${maskedEmail}`;
+
+      sendMail({
+        to: user.email,
+        subject: "UtthanAI — Password reset OTP",
+        text:
+          `Your OTP to reset your UtthanAI password is: ${code}\n\n` +
+          `This code expires in 5 minutes. Do not share it with anyone.`,
+        html:
+          `<p>Your OTP to reset your <strong>UtthanAI</strong> password is:</p>` +
+          `<h2 style="letter-spacing:6px;font-family:monospace;">${code}</h2>` +
+          `<p style="color:#888;font-size:13px;">This code expires in 5 minutes. Do not share it with anyone.</p>`,
+        logContext: "forgot_password_otp",
+      }).catch((err) => console.error("forgot OTP email send error:", err.message));
+    } else {
+      body.maskedMobile = maskPhone(user.phone);
+      body.message = `OTP sent to ${body.maskedMobile}`;
+
+      const smsText = `UtthanAI OTP: ${code}. Valid 5 mins. Do not share.`;
+      sendSms(pn, smsText).catch((err) =>
+        console.error("forgot OTP SMS send error:", err.message)
+      );
     }
+
+    // In dev, expose OTP in response only for SMS (phone may not be reachable).
+    // For email, the real email is sent — no need to leak the code.
+    if (process.env.NODE_ENV !== "production" && via === "sms") {
+      body.code = code;
+      body.message = "OTP sent (dev SMS). Use code to verify.";
+    }
+
     res.json(body);
   } catch (e) {
     console.error("forgotPasswordSendOtp:", e);
@@ -129,19 +192,19 @@ exports.forgotPasswordSendOtp = async (req, res) => {
 /** POST /api/auth/forgot-password/verify-otp */
 exports.forgotPasswordVerifyOtp = async (req, res) => {
   try {
-    const { username, otp } = req.body;
-    if (!username || !otp) {
-      return res.status(400).json({ message: "Username and OTP are required" });
+    // Accept `identifier` (new) or fall back to legacy `username`
+    const identifier = req.body.identifier || req.body.username;
+    const { otp } = req.body;
+    if (!identifier || !otp) {
+      return res.status(400).json({ message: "Identifier and OTP are required" });
     }
     if (!/^[0-9]{6}$/.test(String(otp).trim())) {
       return res.status(400).json({ message: "OTP must be 6 digits" });
     }
 
-    const user = await findUserByUsername(username);
+    const { user } = await resolveUserFromIdentifier(identifier);
     if (!user) {
-      return res
-        .status(400)
-        .json({ message: "Invalid or expired OTP" });
+      return res.status(400).json({ message: "Invalid or expired OTP" });
     }
 
     const result = await verifyOtpOnUser(user, otp, "forgot");
@@ -158,10 +221,7 @@ exports.forgotPasswordVerifyOtp = async (req, res) => {
       { expiresIn: "15m" }
     );
 
-    res.json({
-      message: "OTP verified",
-      resetToken,
-    });
+    res.json({ message: "OTP verified", resetToken });
   } catch (e) {
     console.error("forgotPasswordVerifyOtp:", e);
     res.status(500).json({ message: "Verification failed" });
@@ -221,12 +281,9 @@ exports.forgotPasswordReset = async (req, res) => {
   }
 };
 
-const PENDING_TTL_MS = 15 * 60 * 1000;
-
 /**
  * POST /api/auth/change-password
- * Without otp: validates current + new, stores pending hash, sends OTP.
- * With otp: verifies OTP and applies pending password.
+ * Authenticated users: verify current password, then set new password (no OTP).
  */
 exports.changePassword = async (req, res) => {
   try {
@@ -240,33 +297,7 @@ exports.changePassword = async (req, res) => {
       return res.status(404).json({ message: "User not found" });
     }
 
-    const { currentPassword, newPassword, confirmPassword, otp } = req.body;
-
-    if (otp !== undefined && otp !== null && String(otp).trim() !== "") {
-      const pending = user.pendingPasswordChange;
-      if (
-        !pending?.newPasswordHash ||
-        !pending.expiresAt ||
-        new Date() > new Date(pending.expiresAt)
-      ) {
-        return res.status(400).json({
-          message:
-            "Session expired. Enter your current and new password again to request a new OTP.",
-        });
-      }
-
-      const result = await verifyOtpOnUser(user, otp, "change");
-      if (!result.ok) {
-        return res.status(400).json({ message: result.message });
-      }
-
-      clearOtp(user);
-      user.password = pending.newPasswordHash;
-      user.pendingPasswordChange = undefined;
-      await user.save();
-
-      return res.json({ message: "Password changed successfully" });
-    }
+    const { currentPassword, newPassword, confirmPassword } = req.body;
 
     if (!currentPassword || !newPassword || !confirmPassword) {
       return res.status(400).json({
@@ -296,29 +327,12 @@ exports.changePassword = async (req, res) => {
         .json({ message: "New password must be different from your current password" });
     }
 
-    const phoneDigits = normalizePhone(user.phone);
-    if (!phoneDigits) {
-      return res.status(400).json({
-        message:
-          "No mobile number on your account. Add a phone in your profile or contact support.",
-      });
-    }
-
-    user.pendingPasswordChange = {
-      newPasswordHash: await bcrypt.hash(newPassword, 10),
-      expiresAt: new Date(Date.now() + PENDING_TTL_MS),
-    };
+    clearOtp(user);
+    user.password = await bcrypt.hash(newPassword, 10);
+    user.pendingPasswordChange = undefined;
     await user.save();
-    await assignOtpToUser(user, "change");
 
-    const body = {
-      message: "OTP sent to your registered mobile. Submit the code to confirm.",
-      step: "otp",
-    };
-    if (process.env.NODE_ENV !== "production") {
-      body.code = user.authOtp?.code;
-    }
-    res.json(body);
+    return res.json({ message: "Password changed successfully" });
   } catch (e) {
     console.error("changePassword:", e);
     res.status(500).json({ message: "Could not change password" });

@@ -18,6 +18,8 @@ const upload = require("../middleware/uploadMiddleware");
 const { getFileUrl } = require("../utils/fileUrlHelper");
 const adminAuth = () => roleCheck(["admin", "school_admin"]);
 const teacherAuth = () => roleCheck(["admin", "school_admin", "teacher"]);
+const noticeViewerAuth = () =>
+  roleCheck(["admin", "school_admin", "teacher", "parent", "student"]);
 
 // File upload route
 router.post("/upload", protect, adminAuth(), upload.array("files", 10), async (req, res) => {
@@ -73,11 +75,11 @@ router.get("/admin/:id", protect, adminAuth(), getNoticeById);
 router.put("/admin/:id", protect, adminAuth(), updateNotice);
 router.delete("/admin/:id", protect, adminAuth(), deleteNotice);
 
-// User routes (for teachers, students, parents - active notices)
-router.get("/active", protect, teacherAuth(), getActiveNotices);
-router.get("/:id", protect, teacherAuth(), getNoticeById);
-router.post("/:id/view", protect, teacherAuth(), trackView);
-router.post("/:id/acknowledge", protect, teacherAuth(), acknowledgeNotice);
+// User routes (teachers, students, parents — active notices)
+router.get("/active", protect, noticeViewerAuth(), getActiveNotices);
+router.get("/:id", protect, noticeViewerAuth(), getNoticeById);
+router.post("/:id/view", protect, noticeViewerAuth(), trackView);
+router.post("/:id/acknowledge", protect, noticeViewerAuth(), acknowledgeNotice);
 
 module.exports = router;
 

@@ -43,6 +43,11 @@ function trialEndsAtFromSchool(school) {
 /**
  * True if this school must be blocked from API/login (subscription suspended).
  * Admin bypass window overrides suspension until adminUnblockUntil.
+ *
+ * `SchoolSubscription.status === "inactive"` alone is not enough: access during the
+ * school-level free trial (from School.verifiedAt) is governed by getSchoolBillingAccess.
+ * Otherwise a bulk "set all subscriptions inactive" would emit SUBSCRIPTION_SUSPENDED
+ * even while the trial window is still open.
  */
 async function isSchoolSubscriptionSuspended(schoolId) {
   if (!schoolId) return false;
@@ -51,8 +56,23 @@ async function isSchoolSubscriptionSuspended(schoolId) {
   if (sub.adminUnblockUntil && new Date(sub.adminUnblockUntil) > new Date()) {
     return false;
   }
-  // Immediate block when not in good standing.
-  return sub.status === "inactive";
+  if (sub.status !== "inactive") return false;
+
+  const school = await School.findById(schoolId)
+    .select("verificationStatus verifiedAt")
+    .lean();
+  if (!school || school.verificationStatus !== "Verified") {
+    return false;
+  }
+  if (!school.verifiedAt) {
+    return false;
+  }
+  const trialEndsAt = trialEndsAtFromSchool(school);
+  if (trialEndsAt && Date.now() <= trialEndsAt.getTime()) {
+    return false;
+  }
+
+  return true;
 }
 
 /**

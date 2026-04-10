@@ -9,6 +9,7 @@ const TeacherAssignment = require("../models/TeacherAssignment");
 const StudentPortfolio = require("../models/StudentPortfolio");
 const School = require("../models/School");
 const { sendSms } = require("../utils/smsService");
+const { sendMail } = require("../utils/mail");
 const { uploadBuffer } = require("../utils/cloudinary");
 const { analyzePortfolio, getWeekNumber } = require("../utils/aiAnalysis");
 const { normalizeUsername, suggestAvailableUsernames } = require("../utils/username");
@@ -16,6 +17,7 @@ const {
   resolvePortfolioForStudent,
   portfolioEntryCount,
 } = require("../utils/studentPortfolioResolve");
+const { seatBillingStatusForNewEnrollment } = require("../utils/studentSeatBilling");
 
 const escapeRegex = (value = "") =>
   value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -105,7 +107,7 @@ exports.addStudentToClass = async (req, res) => {
     const classSection = await ClassSection.findById(classSectionId)
       .populate("classId", "name")
       .populate("sectionId", "name")
-      .populate("schoolId", "name");
+      .populate("schoolId", "name email");
 
     if (!classSection) {
       return res.status(404).json({ message: "Class section not found" });
@@ -145,7 +147,8 @@ exports.addStudentToClass = async (req, res) => {
       });
     }
 
-    const hash = await bcrypt.hash(parentPassword, 10);
+    const plainPassword = parentPassword;
+    const hash = await bcrypt.hash(plainPassword, 10);
     const parentUser = await User.create({
       name: parentName || `${studentName}'s Parent`,
       username: parentUserUsername,
@@ -163,6 +166,9 @@ exports.addStudentToClass = async (req, res) => {
     });
     const studentIdentityId = identity._id;
 
+    const schoolIdForBilling = classSection.schoolId?._id ?? classSection.schoolId;
+    const seatBillingStatus = await seatBillingStatusForNewEnrollment(schoolIdForBilling);
+
     const student = await Student.create({
       name: studentName,
       studentIdentityId,
@@ -172,6 +178,7 @@ exports.addStudentToClass = async (req, res) => {
       classId: classSection.classId,
       sectionId: classSection.sectionId || null,
       parentUserId: parentUser._id,
+      seatBillingStatus,
     });
 
     // Create an identity-linked portfolio document for this new profile
@@ -180,30 +187,57 @@ exports.addStudentToClass = async (req, res) => {
       studentIdentityId,
     });
 
-    // // Fire-and-forget SMS with credentials (if we created a new parent)
-    // if (plainPasswordToSend) {
-    //   const schoolName = classSection.schoolId?.name || "Your School";
-    //   const className = classSection.classId?.name || "";
-    //   const sectionName = classSection.sectionId?.name
-    //     ? ` - Section ${classSection.sectionId.name}`
-    //     : "";
+    // Fire-and-forget SMS with login credentials to the parent's phone.
+    // On failure, email the school admin so they can share credentials manually.
+    if (parentPhone) {
+      const schoolName = classSection.schoolId?.name || "Your School";
+      const schoolAdminEmail = classSection.schoolId?.email || null;
+      const cls = classSection.classId?.name || "";
+      const sec = classSection.sectionId?.name ? ` - ${classSection.sectionId.name}` : "";
+      const smsMessage =
+        `UtthanAI Login\n` +
+        `School: ${schoolName}\n` +
+        `Student: ${studentName}${cls ? ` (${cls}${sec})` : ""}\n` +
+        `Username: ${parentUserUsername}\n` +
+        `Password: ${plainPassword}\n` +
+        `Download the UtthanAI Parent app to track your child's progress.`;
 
-    //   const message =
-    //     `Educa Parent Login\n` +
-    //     `School: ${schoolName}\n` +
-    //     `Student: ${studentName}${className ? ` (${className}${sectionName})` : ""}\n` +
-    //     `Username: ${parentUsername}\n` +
-    //     `Password: ${plainPasswordToSend}\n` +
-    //     `Use the Educa Parent app to log in and view updates about your child.`;
+      sendSms(parentPhone, smsMessage).catch((smsErr) => {
+        console.error("Failed to send SMS credentials:", smsErr.message);
+        if (schoolAdminEmail) {
+          sendMail({
+            to: schoolAdminEmail,
+            subject: `SMS delivery failed — share credentials for ${studentName}`,
+            text:
+              `The SMS with login credentials for ${studentName} could not be delivered to ${parentPhone}.\n\n` +
+              `Please share the following credentials with the parent manually:\n\n` +
+              `Student: ${studentName}${cls ? ` (${cls}${sec})` : ""}\n` +
+              `Username: ${parentUserUsername}\n` +
+              `Password: ${plainPassword}\n\n` +
+              `School: ${schoolName}`,
+            html:
+              `<p>The SMS with login credentials for <strong>${studentName}</strong> could not be delivered to <strong>${parentPhone}</strong>.</p>` +
+              `<p>Please share the following credentials with the parent manually:</p>` +
+              `<table style="border-collapse:collapse;font-family:monospace;font-size:14px;">` +
+              `<tr><td style="padding:4px 12px 4px 0;color:#555;">Student</td><td><strong>${studentName}${cls ? ` (${cls}${sec})` : ""}</strong></td></tr>` +
+              `<tr><td style="padding:4px 12px 4px 0;color:#555;">Username</td><td><strong>${parentUserUsername}</strong></td></tr>` +
+              `<tr><td style="padding:4px 12px 4px 0;color:#555;">Password</td><td><strong>${plainPassword}</strong></td></tr>` +
+              `<tr><td style="padding:4px 12px 4px 0;color:#555;">Phone</td><td>${parentPhone}</td></tr>` +
+              `</table>`,
+            logContext: "sms_failure_fallback",
+          }).catch((mailErr) =>
+            console.error("Failed to send SMS-failure fallback email:", mailErr.message)
+          );
+        }
+      });
+    }
 
-    //   sendSms(parentPhone, message).catch((err) =>
-    //     console.error("Failed to send SMS:", err)
-    //   );
-    // }
+    const createdMsg = "Student account created successfully";
 
     res.status(201).json({
-      message: "Student account created successfully",
+      message: createdMsg,
       student,
+      seatBillingPending: seatBillingStatus === "pending_purchase",
       parent: {
         id: parentUser._id,
         name: parentUser.name,
@@ -434,6 +468,9 @@ exports.linkExistingStudentToClass = async (req, res) => {
       studentIdentityId: identity._id,
     }).sort({ createdAt: -1 });
 
+    const schoolIdForBilling = classSection.schoolId?._id ?? classSection.schoolId;
+    const seatBillingStatus = await seatBillingStatusForNewEnrollment(schoolIdForBilling);
+
     const student = await Student.create({
       name: identity.name,
       studentIdentityId: identity._id,
@@ -443,6 +480,7 @@ exports.linkExistingStudentToClass = async (req, res) => {
       classId: classSection.classId,
       sectionId: classSection.sectionId || null,
       parentUserId: identity.parentUserId,
+      seatBillingStatus,
     });
 
     // Ensure portfolio is identity-linked and backfill old entries' schoolId if missing
@@ -474,9 +512,12 @@ exports.linkExistingStudentToClass = async (req, res) => {
       if (shouldSave) await portfolio.save();
     }
 
+    const linkedMsg = "Student linked successfully (history preserved)";
+
     res.status(201).json({
-      message: "Student linked successfully (history preserved)",
+      message: linkedMsg,
       student,
+      seatBillingPending: seatBillingStatus === "pending_purchase",
     });
   } catch (error) {
     console.error("linkExistingStudentToClass error:", error);
@@ -561,7 +602,7 @@ exports.getStudentsForClassSection = async (req, res) => {
 
     const students = await Student.find({ classSectionId, status: "active" })
       .populate("parentUserId", "name username")
-      .select("name rollNumber classSectionId parentUserId")
+      .select("name rollNumber classSectionId parentUserId seatBillingStatus")
       .sort({ createdAt: 1 });
 
     const formatted = students.map((s) => ({
@@ -570,6 +611,8 @@ exports.getStudentsForClassSection = async (req, res) => {
       rollNumber: s.rollNumber,
       parentName: s.parentUserId?.name || "",
       parentUsername: s.parentUserId?.username || "",
+      seatBillingStatus: s.seatBillingStatus || "included",
+      seatBillingPending: s.seatBillingStatus === "pending_purchase",
     }));
 
     res.json({ data: formatted });
@@ -750,6 +793,20 @@ const ensureTeacherOrAdminCanAccessStudent = async (req, studentId) => {
   return { student };
 };
 
+/** Teachers cannot add portfolio data until the school admin activates the student's paid seat. */
+function seatPendingProgressBlock(req, student) {
+  if (req.user.role !== "teacher") return null;
+  if (student.seatBillingStatus === "pending_purchase") {
+    return {
+      status: 403,
+      message:
+        "This student's seat is pending school billing. Progress cannot be added until the school admin adds them to the subscription.",
+      code: "SEAT_BILLING_PENDING",
+    };
+  }
+  return null;
+}
+
 // Get a student's full portfolio (academic, behavior, skills)
 exports.getStudentPortfolio = async (req, res) => {
   try {
@@ -820,6 +877,8 @@ exports.getStudentPortfolio = async (req, res) => {
       meta: {
         currentSchoolId,
         schoolsById,
+        seatBillingPendingForTeacher:
+          req.user.role === "teacher" && student.seatBillingStatus === "pending_purchase",
       },
     });
   } catch (error) {
@@ -851,6 +910,13 @@ exports.addAcademicRecord = async (req, res) => {
 
     const { error, student } = await ensureTeacherOrAdminCanAccessStudent(req, id);
     if (error) return res.status(error.status).json({ message: error.message });
+
+    const progressBlock = seatPendingProgressBlock(req, student);
+    if (progressBlock) {
+      return res
+        .status(progressBlock.status)
+        .json({ message: progressBlock.message, code: progressBlock.code });
+    }
 
     const studentIdentityId = await ensureStudentIdentityForStudent(student);
 
@@ -962,6 +1028,13 @@ exports.addBehaviorRecord = async (req, res) => {
     const { error, student } = await ensureTeacherOrAdminCanAccessStudent(req, id);
     if (error) return res.status(error.status).json({ message: error.message });
 
+    const progressBlock = seatPendingProgressBlock(req, student);
+    if (progressBlock) {
+      return res
+        .status(progressBlock.status)
+        .json({ message: progressBlock.message, code: progressBlock.code });
+    }
+
     const studentIdentityId = await ensureStudentIdentityForStudent(student);
 
     const portfolio = await resolvePortfolioForStudent(student, studentIdentityId);
@@ -973,6 +1046,7 @@ exports.addBehaviorRecord = async (req, res) => {
       schoolId: student.schoolId,
       weekNumber,
       date: entryDate,
+      recordedAt: new Date(),
       discipline,
       respect,
       attention,
@@ -1004,6 +1078,13 @@ exports.addSkillRecord = async (req, res) => {
 
     const { error, student } = await ensureTeacherOrAdminCanAccessStudent(req, id);
     if (error) return res.status(error.status).json({ message: error.message });
+
+    const progressBlock = seatPendingProgressBlock(req, student);
+    if (progressBlock) {
+      return res
+        .status(progressBlock.status)
+        .json({ message: progressBlock.message, code: progressBlock.code });
+    }
 
     const studentIdentityId = await ensureStudentIdentityForStudent(student);
 
@@ -1079,6 +1160,13 @@ exports.addWellbeingRecord = async (req, res) => {
     const { error, student } = await ensureTeacherOrAdminCanAccessStudent(req, id);
     if (error) return res.status(error.status).json({ message: error.message });
 
+    const progressBlock = seatPendingProgressBlock(req, student);
+    if (progressBlock) {
+      return res
+        .status(progressBlock.status)
+        .json({ message: progressBlock.message, code: progressBlock.code });
+    }
+
     const studentIdentityId = await ensureStudentIdentityForStudent(student);
 
     const portfolio = await resolvePortfolioForStudent(student, studentIdentityId);
@@ -1090,6 +1178,7 @@ exports.addWellbeingRecord = async (req, res) => {
       schoolId: student.schoolId,
       weekNumber,
       date: entryDate,
+      recordedAt: new Date(),
       status,
       tags: Array.isArray(tags) ? tags : [],
       teacherRemark,
@@ -1110,6 +1199,13 @@ exports.getAIAnalysis = async (req, res) => {
 
     const { error, student } = await ensureTeacherOrAdminCanAccessStudent(req, id);
     if (error) return res.status(error.status).json({ message: error.message });
+
+    const progressBlock = seatPendingProgressBlock(req, student);
+    if (progressBlock) {
+      return res
+        .status(progressBlock.status)
+        .json({ message: progressBlock.message, code: progressBlock.code });
+    }
 
     const studentIdentityId = await ensureStudentIdentityForStudent(student);
 

@@ -1,15 +1,14 @@
 const mongoose = require("mongoose");
 const Stripe = require("stripe");
 const School = require("../models/School");
-const Student = require("../models/Student");
 const SchoolSubscription = require("../models/SchoolSubscription");
 const BillingSettings = require("../models/BillingSettings");
 const { planAmountPaise, stripeIntervalForPlan } = require("../utils/subscriptionPricing");
+const { getSchoolBillingAccess, trialEndsAtFromSchool } = require("../utils/subscriptionAccess");
 const {
-  getSchoolBillingAccess,
-  trialEndsAtFromSchool,
-  subscriptionAnchoredAfterSchoolTrial,
-} = require("../utils/subscriptionAccess");
+  countRosterActiveStudents,
+  countIncludedSeatStudents,
+} = require("../utils/studentSeatBilling");
 const { sendMail } = require("../utils/mail");
 
 function stripeSecretKey() {
@@ -41,13 +40,6 @@ async function getBillingSettingsDoc() {
     });
   }
   return b;
-}
-
-async function countActiveStudents(schoolId) {
-  return Student.countDocuments({
-    schoolId: new mongoose.Types.ObjectId(schoolId),
-    status: "active",
-  });
 }
 
 /** Normalize DB/webhook status for API clients. */
@@ -204,12 +196,15 @@ exports.createCheckoutSession = async (req, res) => {
     }
 
     const billing = await getBillingSettingsDoc();
-    const activeStudents = await countActiveStudents(school._id);
-    if (activeStudents < 1) {
-      return res.status(400).json({ message: "Add at least one active student before subscribing" });
+    const includedSeats = await countIncludedSeatStudents(school._id);
+    if (includedSeats < 1) {
+      return res.status(400).json({
+        message:
+          "Add at least one student with an included seat before subscribing. (Pending-seat students do not count until activated.)",
+      });
     }
 
-    const studentCount = activeStudents;
+    const studentCount = includedSeats;
 
     const unitMinor = stripePrice.unit_amount;
     if (unitMinor == null || unitMinor < 1) {
@@ -330,7 +325,8 @@ exports.getSubscriptionCatalog = async (req, res) => {
       return res.status(403).json({ message: "Forbidden" });
     }
 
-    const studentCount = await countActiveStudents(user.schoolId);
+    const rosterCount = await countRosterActiveStudents(user.schoolId);
+    const includedSeatCount = await countIncludedSeatStudents(user.schoolId);
 
     if (!isStripeConfigured()) {
       return res.json({
@@ -338,7 +334,8 @@ exports.getSubscriptionCatalog = async (req, res) => {
           stripeConfigured: false,
           product: null,
           prices: [],
-          activeStudentCount: studentCount,
+          activeStudentCount: rosterCount,
+          includedSeatStudentCount: includedSeatCount,
         },
       });
     }
@@ -366,7 +363,8 @@ exports.getSubscriptionCatalog = async (req, res) => {
           intervalCount: p.recurring?.interval_count || 1,
           intervalLabel: formatRecurringLabel(p.recurring),
           plan: inferPlanFromRecurring(p.recurring),
-          totalForSchoolInr: studentCount >= 1 ? (unitMinor * studentCount) / 100 : null,
+          totalForSchoolInr:
+            includedSeatCount >= 1 ? (unitMinor * includedSeatCount) / 100 : null,
         };
       });
 
@@ -379,7 +377,8 @@ exports.getSubscriptionCatalog = async (req, res) => {
           description: product.description || null,
         },
         prices,
-        activeStudentCount: studentCount,
+        activeStudentCount: rosterCount,
+        includedSeatStudentCount: includedSeatCount,
       },
     });
   } catch (err) {
@@ -399,67 +398,47 @@ exports.getSubscriptionStatus = async (req, res) => {
     }
 
     const billing = await getBillingSettingsDoc();
-    const studentCount = await countActiveStudents(user.schoolId);
-    const sub = await SchoolSubscription.findOne({ schoolId: user.schoolId }).lean();
     const school = await School.findById(user.schoolId)
       .select("name email verificationStatus verifiedAt createdAt")
       .lean();
     const trialAccess = await getSchoolBillingAccess(user.schoolId, { school });
 
-    const schoolTrialEnd = trialEndsAtFromSchool(school);
-    const adminUnblockActive =
-      sub?.adminUnblockUntil && new Date(sub.adminUnblockUntil) > new Date();
-    const maskStaleMongoSub =
-      !adminUnblockActive &&
-      Boolean(school?.verifiedAt && schoolTrialEnd) &&
-      Date.now() > schoolTrialEnd.getTime() &&
-      !subscriptionAnchoredAfterSchoolTrial(sub, schoolTrialEnd);
+    const sub = await SchoolSubscription.findOne({ schoolId: user.schoolId }).lean();
 
-    let plan = sub?.plan || null;
-    let statusOut = subscriptionStatusForClient(sub?.status);
-    let currentPeriodStart = sub?.currentPeriodStart;
-    let currentPeriodEnd = sub?.currentPeriodEnd;
-    let graceEndsAt = sub?.graceEndsAt;
-    let lastPaymentAt = sub?.lastPaymentAt;
-    let billingMode = sub?.billingMode || null;
+    const rosterCount = await countRosterActiveStudents(user.schoolId);
+    const includedSeatCount = await countIncludedSeatStudents(user.schoolId);
 
-    if (trialAccess.inTrial) {
-      statusOut = "trialing";
-    } else if (maskStaleMongoSub) {
-      plan = null;
-      statusOut = "inactive";
-      currentPeriodStart = undefined;
-      currentPeriodEnd = undefined;
-      graceEndsAt = undefined;
-      lastPaymentAt = undefined;
-      billingMode = null;
-    } else if (!sub?.status) {
-      statusOut = "inactive";
-    }
-    if (!trialAccess.inTrial && ["none", "inactive"].includes(statusOut)) {
-      statusOut = "inactive";
-    }
+    const plan = sub?.plan || null;
+    const statusOut = sub?.status ?? null;
+    const currentPeriodStart = sub?.currentPeriodStart;
+    const currentPeriodEnd = sub?.currentPeriodEnd;
+    const graceEndsAt = sub?.graceEndsAt;
+    const lastPaymentAt = sub?.lastPaymentAt;
+    const billingMode = sub?.billingMode || null;
 
     const amountPaise =
       plan && ["monthly", "quarterly", "yearly"].includes(plan)
-        ? planAmountPaise(plan, studentCount, billing.pricePerStudentYearInr)
+        ? planAmountPaise(plan, includedSeatCount, billing.pricePerStudentYearInr)
         : null;
 
     // Quote all cadences whenever we have a student count so checkout cards can show prices
     // before the school has chosen a plan (plan null / status none).
     const amountsInr =
-      studentCount >= 1
+      includedSeatCount >= 1
         ? {
-            monthly: planAmountPaise("monthly", studentCount, billing.pricePerStudentYearInr) / 100,
-            quarterly: planAmountPaise("quarterly", studentCount, billing.pricePerStudentYearInr) / 100,
-            yearly: planAmountPaise("yearly", studentCount, billing.pricePerStudentYearInr) / 100,
+            monthly: planAmountPaise("monthly", includedSeatCount, billing.pricePerStudentYearInr) / 100,
+            quarterly:
+              planAmountPaise("quarterly", includedSeatCount, billing.pricePerStudentYearInr) / 100,
+            yearly: planAmountPaise("yearly", includedSeatCount, billing.pricePerStudentYearInr) / 100,
           }
         : null;
 
     return res.json({
       data: {
         school: { name: school?.name, email: school?.email },
-        activeStudentCount: studentCount,
+        activeStudentCount: rosterCount,
+        includedSeatCount,
+        billedSeatCount: sub?.billedStudentCount ?? null,
         pricePerStudentYearInr: billing.pricePerStudentYearInr,
         plan,
         amountsInr,
@@ -476,7 +455,7 @@ exports.getSubscriptionStatus = async (req, res) => {
         inTrial: trialAccess.inTrial,
         needsSubscription: trialAccess.needsSubscription,
         hasBillingAccess: trialAccess.allowed,
-        staleSubscriptionIgnored: maskStaleMongoSub,
+        staleSubscriptionIgnored: false,
       },
     });
   } catch (err) {
@@ -506,7 +485,7 @@ exports.syncStudentCountToStripe = async (req, res) => {
     }
 
     const billing = await getBillingSettingsDoc();
-    const studentCount = await countActiveStudents(user.schoolId);
+    const includedSeatCount = await countIncludedSeatStudents(user.schoolId);
 
     const stripeSub = await stripe.subscriptions.retrieve(sub.stripeSubscriptionId, {
       expand: ["items.data.price"],
@@ -519,17 +498,17 @@ exports.syncStudentCountToStripe = async (req, res) => {
 
     if (sub.billingMode === "per_seat") {
       await stripe.subscriptions.update(sub.stripeSubscriptionId, {
-        items: [{ id: itemId, quantity: studentCount }],
+        items: [{ id: itemId, quantity: includedSeatCount }],
         proration_behavior: "create_prorations",
       });
 
-      sub.billedStudentCount = studentCount;
+      sub.billedStudentCount = includedSeatCount;
       sub.pricePerStudentYearInr = billing.pricePerStudentYearInr;
       await sub.save();
 
       return res.json({
         message: "Subscription seat count updated in Stripe (prorations may apply)",
-        data: { activeStudentCount: studentCount, billingMode: "per_seat" },
+        data: { activeStudentCount: includedSeatCount, billingMode: "per_seat" },
       });
     }
 
@@ -538,7 +517,7 @@ exports.syncStudentCountToStripe = async (req, res) => {
       return res.status(400).json({ message: "Plan unknown — cannot sync legacy subscription" });
     }
 
-    const amountPaise = planAmountPaise(plan, studentCount, billing.pricePerStudentYearInr);
+    const amountPaise = planAmountPaise(plan, includedSeatCount, billing.pricePerStudentYearInr);
     const productId = stripeProductId();
     const recurring = stripeIntervalForPlan(plan);
 
@@ -555,14 +534,14 @@ exports.syncStudentCountToStripe = async (req, res) => {
       proration_behavior: "create_prorations",
     });
 
-    sub.billedStudentCount = studentCount;
+    sub.billedStudentCount = includedSeatCount;
     sub.pricePerStudentYearInr = billing.pricePerStudentYearInr;
     sub.stripePriceId = newPrice.id;
     await sub.save();
 
     return res.json({
       message: "Subscription updated for new student count (prorations may apply)",
-      data: { activeStudentCount: studentCount, amountPaise, billingMode: "dynamic_total" },
+      data: { activeStudentCount: includedSeatCount, amountPaise, billingMode: "dynamic_total" },
     });
   } catch (err) {
     console.error("syncStudentCountToStripe:", err);
@@ -594,6 +573,7 @@ async function handleInvoicePaid(stripe, invoice, fallbackSchoolId) {
   subDoc.graceReminderDay = undefined;
   subDoc.remindersSent = { preDue3: false, preDue2: false, preDue1: false };
   await subDoc.save();
+
 }
 
 async function handleInvoicePaymentFailed(stripe, invoice) {
@@ -656,6 +636,12 @@ async function handleSubscriptionUpdated(stripeSub, fallbackSchoolId) {
   subDoc.stripeSubscriptionId = stripeSub.id;
   const cust2 = stripeSub.customer;
   subDoc.stripeCustomerId = typeof cust2 === "string" ? cust2 : cust2?.id;
+
+  const itemQty = stripeSub.items?.data?.[0]?.quantity;
+  if (itemQty != null && subDoc.billingMode === "per_seat") {
+    subDoc.billedStudentCount = itemQty;
+  }
+
   await subDoc.save();
 }
 
