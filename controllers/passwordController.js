@@ -155,14 +155,63 @@ exports.forgotPasswordSendOtp = async (req, res) => {
 
       sendMail({
         to: user.email,
-        subject: "UtthanAI — Password reset OTP",
+        subject: "🔐 Password Reset OTP — UtthanAI",
         text:
-          `Your OTP to reset your UtthanAI password is: ${code}\n\n` +
-          `This code expires in 5 minutes. Do not share it with anyone.`,
-        html:
-          `<p>Your OTP to reset your <strong>UtthanAI</strong> password is:</p>` +
-          `<h2 style="letter-spacing:6px;font-family:monospace;">${code}</h2>` +
-          `<p style="color:#888;font-size:13px;">This code expires in 5 minutes. Do not share it with anyone.</p>`,
+          `Dear User,\n\n` +
+          `We received a request to reset your password for your UtthanAI account.\n\n` +
+          `Your OTP Code: ${code}\n\n` +
+          `This OTP is valid for 10 minutes. Please do not share this code with anyone for security reasons.\n\n` +
+          `If you did not request this, please ignore this email or contact support@utthanai.com immediately.\n\n` +
+          `Stay secure,\nTeam UtthanAI\nEmpowering Education with AI`,
+        html: `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/></head>
+<body style="margin:0;padding:0;background:#f4f6f9;font-family:'Segoe UI',Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f6f9;padding:32px 0;">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.08);">
+        <tr>
+          <td style="background:linear-gradient(135deg,#4f46e5 0%,#6366f1 100%);padding:28px 36px;text-align:center;">
+            <p style="margin:0;color:#ffffff;font-size:20px;font-weight:700;letter-spacing:0.5px;">UtthanAI</p>
+            <p style="margin:4px 0 0;color:#c7d2fe;font-size:13px;letter-spacing:1px;text-transform:uppercase;">Empowering Education with AI</p>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:36px 36px 28px;">
+            <h1 style="margin:0 0 8px;font-size:22px;font-weight:700;color:#1e1b4b;">Password Reset Request 🔐</h1>
+            <p style="margin:0 0 20px;font-size:15px;color:#334155;line-height:1.6;">Dear User,</p>
+            <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">
+              We received a request to reset your password for your <strong>UtthanAI</strong> account.
+            </p>
+            <p style="margin:0 0 6px;font-size:14px;color:#64748b;font-weight:600;">Your OTP Code:</p>
+            <div style="background:#f1f5f9;border:2px dashed #6366f1;border-radius:10px;text-align:center;padding:20px;margin:12px 0 24px;">
+              <span style="font-size:38px;font-weight:800;letter-spacing:12px;color:#4f46e5;font-family:monospace;">${code}</span>
+            </div>
+            <div style="background:#fef2f2;border-left:4px solid #ef4444;border-radius:4px;padding:12px 16px;margin-bottom:20px;">
+              <p style="margin:0;font-size:13px;color:#991b1b;line-height:1.5;">
+                ⏱️ This OTP is valid for <strong>10 minutes</strong>. Please do not share this code with anyone for security reasons.
+              </p>
+            </div>
+            <p style="margin:0 0 14px;font-size:15px;color:#334155;line-height:1.6;">
+              If you did not request a password reset, please ignore this email or contact us immediately at
+              <a href="mailto:support@utthanai.com" style="color:#4f46e5;">support@utthanai.com</a>.
+            </p>
+            <p style="margin:0;font-size:15px;color:#334155;">Stay secure,<br/><strong>Team UtthanAI</strong></p>
+          </td>
+        </tr>
+        <tr>
+          <td style="background:#f8fafc;border-top:1px solid #e2e8f0;padding:20px 36px;text-align:center;">
+            <p style="margin:0 0 4px;color:#94a3b8;font-size:12px;">
+              Questions? <a href="mailto:support@utthanai.com" style="color:#6366f1;text-decoration:none;">support@utthanai.com</a>
+            </p>
+            <p style="margin:0;color:#cbd5e1;font-size:11px;">© ${new Date().getFullYear()} UtthanAI. All rights reserved.</p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`,
         logContext: "forgot_password_otp",
       }).catch((err) => console.error("forgot OTP email send error:", err.message));
     } else {

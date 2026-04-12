@@ -59,6 +59,8 @@ app.use("/api/conversations", require("./routes/conversationRoutes"));
 app.use("/api/student-leaves", require("./routes/studentLeaveRoutes"));
 app.use("/api/teacher-attendance", require("./routes/teacherAttendanceRoutes"));
 app.use("/api/subscription", require("./routes/subscriptionRoutes"));
+app.use("/api/blogs", require("./routes/blogRoutes"));
+app.use("/api/contacts", require("./routes/contactRoutes"));
 
 // Cron jobs
 require("./cron/markTeachersAbsent");

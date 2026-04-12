@@ -3,6 +3,14 @@ const Stripe = require("stripe");
 const School = require("../models/School");
 const SchoolSubscription = require("../models/SchoolSubscription");
 const BillingSettings = require("../models/BillingSettings");
+const Student = require("../models/Student");
+const User = require("../models/User");
+const {
+  isSchoolSubscriptionActivePaid,
+  getPricePerStudentYearInr,
+  resolvePendingStudentsAmountInr,
+  countPendingActivationStudents,
+} = require("../utils/pendingStudentsEnrollment");
 const { planAmountPaise, stripeIntervalForPlan } = require("../utils/subscriptionPricing");
 const { getSchoolBillingAccess, trialEndsAtFromSchool } = require("../utils/subscriptionAccess");
 const {
@@ -10,6 +18,7 @@ const {
   countIncludedSeatStudents,
 } = require("../utils/studentSeatBilling");
 const { sendMail } = require("../utils/mail");
+const { sendSms } = require("../utils/smsService");
 
 function stripeSecretKey() {
   const k = process.env.STRIPE_SECRET_KEY;
@@ -129,6 +138,33 @@ async function ensureStripeCustomerForSchoolCheckout(stripe, subDoc, school) {
 }
 
 /**
+ * India exports + consistent UX: billing details on Checkout, same payment method options as subscription.
+ * @see https://stripe.com/docs/india-exports
+ */
+function applyStripeCheckoutBillingAndPayments(sessionConfig) {
+  sessionConfig.billing_address_collection = "required";
+  sessionConfig.customer_update = {
+    address: "auto",
+    name: "auto",
+  };
+
+  const pmcId = process.env.STRIPE_PAYMENT_METHOD_CONFIGURATION_ID?.trim();
+  const pmTypesEnv = process.env.STRIPE_CHECKOUT_PAYMENT_METHOD_TYPES?.trim();
+  const apmOff = process.env.STRIPE_CHECKOUT_AUTOMATIC_PAYMENT_METHODS === "false";
+
+  if (pmcId) {
+    sessionConfig.payment_method_configuration = pmcId;
+  } else if (pmTypesEnv) {
+    const list = pmTypesEnv.split(",").map((s) => s.trim()).filter(Boolean);
+    if (list.length) sessionConfig.payment_method_types = list;
+  } else if (!apmOff) {
+    sessionConfig.automatic_payment_methods = { enabled: true };
+  } else {
+    sessionConfig.payment_method_types = ["card"];
+  }
+}
+
+/**
  * POST /api/subscription/checkout — school_admin
  * body: { priceId: string } — recurring price on STRIPE_PRODUCT_ID; quantity is always active students on the roster.
  */
@@ -245,11 +281,6 @@ exports.createCheckoutSession = async (req, res) => {
       line_items: [{ price: priceId, quantity: studentCount }],
       success_url: `${webAppBase()}/dashboard/subscription?sub=success&session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${webAppBase()}/dashboard/subscription?sub=canceled`,
-      billing_address_collection: "required",
-      customer_update: {
-        address: "auto",
-        name: "auto",
-      },
       metadata: {
         schoolId: school._id.toString(),
         plan,
@@ -267,25 +298,7 @@ exports.createCheckoutSession = async (req, res) => {
       },
     };
 
-    // Payment methods (pick one path):
-    // - payment_method_configuration (pmc_...) — Dashboard config
-    // - payment_method_types — explicit list
-    // - automatic_payment_methods — same idea as PaymentIntents: let Stripe choose from Dashboard (when supported on your API version)
-    const pmcId = process.env.STRIPE_PAYMENT_METHOD_CONFIGURATION_ID?.trim();
-    const pmTypesEnv = process.env.STRIPE_CHECKOUT_PAYMENT_METHOD_TYPES?.trim();
-    const apmOff = process.env.STRIPE_CHECKOUT_AUTOMATIC_PAYMENT_METHODS === "false";
-
-    if (pmcId) {
-      sessionConfig.payment_method_configuration = pmcId;
-    } else if (pmTypesEnv) {
-      const list = pmTypesEnv.split(",").map((s) => s.trim()).filter(Boolean);
-      if (list.length) sessionConfig.payment_method_types = list;
-    } else if (!apmOff) {
-      sessionConfig.automatic_payment_methods = { enabled: true };
-    }
-
-    // Customer.name is already set to the school name; billing_address_collection handles address.
-    // We do not use name_collection here — extra "business name" fields are redundant for schools.
+    applyStripeCheckoutBillingAndPayments(sessionConfig);
 
     let session;
     try {
@@ -316,6 +329,77 @@ exports.createCheckoutSession = async (req, res) => {
 };
 
 /**
+ * Stripe product + recurring INR prices for STRIPE_PRODUCT_ID.
+ * @param {number} includedSeatCount used only for totalForSchoolInr on each row (0 => null).
+ */
+async function loadSubscriptionStripeCatalogPrices(includedSeatCount) {
+  if (!isStripeConfigured()) {
+    return {
+      stripeConfigured: false,
+      product: null,
+      prices: [],
+    };
+  }
+
+  const stripe = getStripe();
+  const productId = stripeProductId();
+
+  const [product, pricesList] = await Promise.all([
+    stripe.products.retrieve(productId),
+    stripe.prices.list({ product: productId, active: true, type: "recurring", limit: 100 }),
+  ]);
+
+  const prices = pricesList.data
+    .filter((p) => p.currency === "inr" && p.unit_amount != null && p.unit_amount >= 1)
+    .sort((a, b) => recurringSortKey(a.recurring) - recurringSortKey(b.recurring))
+    .map((p) => {
+      const unitMinor = p.unit_amount || 0;
+      return {
+        id: p.id,
+        nickname: p.nickname || null,
+        currency: p.currency,
+        unitAmountMinor: unitMinor,
+        unitAmountInr: unitMinor / 100,
+        interval: p.recurring?.interval,
+        intervalCount: p.recurring?.interval_count || 1,
+        intervalLabel: formatRecurringLabel(p.recurring),
+        plan: inferPlanFromRecurring(p.recurring),
+        totalForSchoolInr:
+          includedSeatCount >= 1 ? (unitMinor * includedSeatCount) / 100 : null,
+      };
+    });
+
+  return {
+    stripeConfigured: true,
+    product: {
+      id: product.id,
+      name: product.name,
+      description: product.description || null,
+    },
+    prices,
+  };
+}
+
+/**
+ * GET /api/subscription/public-catalog — same prices as dashboard catalog, no auth (marketing site).
+ */
+exports.getPublicSubscriptionCatalog = async (req, res) => {
+  try {
+    const base = await loadSubscriptionStripeCatalogPrices(0);
+    return res.json({
+      data: {
+        stripeConfigured: base.stripeConfigured,
+        product: base.product,
+        prices: base.prices,
+      },
+    });
+  } catch (err) {
+    console.error("getPublicSubscriptionCatalog:", err);
+    return res.status(500).json({ message: err.message || "Failed to load catalog" });
+  }
+};
+
+/**
  * GET /api/subscription/catalog — Stripe product + recurring INR prices (school_admin)
  */
 exports.getSubscriptionCatalog = async (req, res) => {
@@ -328,55 +412,13 @@ exports.getSubscriptionCatalog = async (req, res) => {
     const rosterCount = await countRosterActiveStudents(user.schoolId);
     const includedSeatCount = await countIncludedSeatStudents(user.schoolId);
 
-    if (!isStripeConfigured()) {
-      return res.json({
-        data: {
-          stripeConfigured: false,
-          product: null,
-          prices: [],
-          activeStudentCount: rosterCount,
-          includedSeatStudentCount: includedSeatCount,
-        },
-      });
-    }
-
-    const stripe = getStripe();
-    const productId = stripeProductId();
-
-    const [product, pricesList] = await Promise.all([
-      stripe.products.retrieve(productId),
-      stripe.prices.list({ product: productId, active: true, type: "recurring", limit: 100 }),
-    ]);
-
-    const prices = pricesList.data
-      .filter((p) => p.currency === "inr" && p.unit_amount != null && p.unit_amount >= 1)
-      .sort((a, b) => recurringSortKey(a.recurring) - recurringSortKey(b.recurring))
-      .map((p) => {
-        const unitMinor = p.unit_amount || 0;
-        return {
-          id: p.id,
-          nickname: p.nickname || null,
-          currency: p.currency,
-          unitAmountMinor: unitMinor,
-          unitAmountInr: unitMinor / 100,
-          interval: p.recurring?.interval,
-          intervalCount: p.recurring?.interval_count || 1,
-          intervalLabel: formatRecurringLabel(p.recurring),
-          plan: inferPlanFromRecurring(p.recurring),
-          totalForSchoolInr:
-            includedSeatCount >= 1 ? (unitMinor * includedSeatCount) / 100 : null,
-        };
-      });
+    const base = await loadSubscriptionStripeCatalogPrices(includedSeatCount);
 
     return res.json({
       data: {
-        stripeConfigured: true,
-        product: {
-          id: product.id,
-          name: product.name,
-          description: product.description || null,
-        },
-        prices,
+        stripeConfigured: base.stripeConfigured,
+        product: base.product,
+        prices: base.prices,
         activeStudentCount: rosterCount,
         includedSeatStudentCount: includedSeatCount,
       },
@@ -734,6 +776,268 @@ exports.confirmCheckoutSession = async (req, res) => {
 };
 
 /**
+ * One-time Checkout for pending student activations (mode=payment).
+ * Idempotent: duplicate webhooks get modifiedCount 0 on Student.updateMany.
+ * Aligns billedStudentCount and (for per_seat) Stripe subscription quantity without extra proration
+ * (the Checkout payment already covered the prorated amount).
+ */
+async function handlePendingStudentsCheckoutCompleted(session) {
+  const meta = session.metadata || {};
+  if (meta.type !== "pending_students") return;
+  const schoolIdRaw = meta.school_id || meta.schoolId;
+  if (!schoolIdRaw) return;
+  if (session.payment_status !== "paid") return;
+
+  const schoolId = new mongoose.Types.ObjectId(String(schoolIdRaw));
+
+  // Fetch pending students before activation so we can read their stored credentials.
+  const pendingStudents = await Student.find(
+    { schoolId, status: "pending" },
+    { _id: 1, name: 1, "pendingCredentialsSms.phone": 1, "pendingCredentialsSms.message": 1 }
+  ).lean();
+
+  const result = await Student.updateMany(
+    { schoolId, status: "pending" },
+    {
+      $set: { status: "active", seatBillingStatus: "included" },
+      $unset: { pendingCredentialsSms: "" },
+    }
+  );
+
+  if (result.modifiedCount === 0) return;
+
+  // Send deferred SMS credentials to each newly activated student's parent.
+  for (const s of pendingStudents) {
+    const phone = s.pendingCredentialsSms?.phone;
+    const message = s.pendingCredentialsSms?.message;
+    if (phone && message) {
+      sendSms(phone, message).catch((err) =>
+        console.error(`Failed to send activation SMS for student ${s._id}:`, err.message)
+      );
+    }
+  }
+
+  const schoolIdStr = String(schoolIdRaw);
+  const includedSeatCount = await countIncludedSeatStudents(schoolIdStr);
+
+  await SchoolSubscription.updateOne(
+    { schoolId: schoolIdStr },
+    { $set: { billedStudentCount: includedSeatCount } }
+  );
+
+  const stripe = getStripe();
+  const subDoc = await SchoolSubscription.findOne({ schoolId: schoolIdStr });
+  if (stripe && subDoc?.stripeSubscriptionId && subDoc.billingMode === "per_seat") {
+    try {
+      const stripeSub = await stripe.subscriptions.retrieve(subDoc.stripeSubscriptionId);
+      const itemId = stripeSub.items.data[0]?.id;
+      if (itemId) {
+        await stripe.subscriptions.update(subDoc.stripeSubscriptionId, {
+          items: [{ id: itemId, quantity: includedSeatCount }],
+          proration_behavior: "none",
+        });
+      }
+    } catch (e) {
+      console.error("pending_students Stripe quantity sync:", e);
+    }
+  }
+}
+
+/**
+ * GET /api/subscription/pending-students-activation-quote
+ */
+exports.getPendingStudentsActivationQuote = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user || user.role !== "school_admin" || !user.schoolId) {
+      return res.status(403).json({ message: "Only school administrators can view this" });
+    }
+    const schoolId = user.schoolId;
+    const subscriptionActive = await isSchoolSubscriptionActivePaid(schoolId);
+    const sub = await SchoolSubscription.findOne({ schoolId }).lean();
+    const pendingCount = await countPendingActivationStudents(schoolId);
+    const pricePerYear = await getPricePerStudentYearInr();
+    const planEnd = sub?.currentPeriodEnd || null;
+    const planExpired = !planEnd || new Date(planEnd) <= new Date();
+    let amountInr = 0;
+    let amountSource = "none";
+    if (pendingCount > 0 && !planExpired) {
+      const resolved = await resolvePendingStudentsAmountInr(
+        schoolId,
+        pendingCount,
+        sub,
+        pricePerYear
+      );
+      amountInr = resolved.amountInr;
+      amountSource = resolved.source;
+    }
+
+    return res.json({
+      pendingCount,
+      amountInr,
+      amountSource,
+      currency: "inr",
+      plan: sub?.plan ?? null,
+      planEndDate: planEnd,
+      currentPeriodStart: sub?.currentPeriodStart ?? null,
+      currentPeriodEnd: sub?.currentPeriodEnd ?? null,
+      pricePerStudentYearInr: pricePerYear,
+      subscriptionActive,
+      planExpired,
+      canCheckout: subscriptionActive && pendingCount > 0 && !planExpired,
+    });
+  } catch (err) {
+    console.error("getPendingStudentsActivationQuote:", err);
+    return res.status(500).json({ message: err.message || "Could not load quote" });
+  }
+};
+
+/**
+ * POST /api/schools/:id/create-pending-checkout
+ * India Stripe + INR: non-Indian test cards (e.g. 4242…) are treated as international and fail without export
+ * onboarding; use test Visa 4000003560000008. @see https://docs.stripe.com/testing#international-cards
+ */
+exports.createPendingStudentsCheckout = async (req, res) => {
+  try {
+    const stripe = getStripe();
+    if (!stripe) {
+      return res.status(503).json({ message: "Stripe is not configured (STRIPE_SECRET_KEY)" });
+    }
+
+    const user = await User.findById(req.user.id);
+    if (!user || user.role !== "school_admin" || !user.schoolId) {
+      return res.status(403).json({ message: "Only school administrators can checkout" });
+    }
+
+    const paramId = req.params.id;
+    if (!paramId || String(user.schoolId) !== String(paramId)) {
+      return res.status(403).json({ message: "You can only checkout for your own school" });
+    }
+
+    const schoolId = user.schoolId;
+    const school = await School.findById(schoolId);
+    if (!school || school.verificationStatus !== "Verified") {
+      return res.status(403).json({ message: "School must be verified before paying" });
+    }
+
+    if (!schoolHasStripeExportAddress(school)) {
+      return res.status(400).json({
+        message:
+          "Complete your school profile (name, address line 1, city, PIN code) before paying. Stripe requires this for India export compliance.",
+      });
+    }
+
+    if (!(await isSchoolSubscriptionActivePaid(schoolId))) {
+      return res.status(400).json({
+        message: "Pending student activation is only available while your subscription is active.",
+        code: "SUBSCRIPTION_NOT_ACTIVE",
+      });
+    }
+
+    const subDoc = await SchoolSubscription.findOne({ schoolId });
+    if (!subDoc || subDoc.status !== "active") {
+      return res.status(400).json({ message: "No active subscription found for this school" });
+    }
+
+    if (!subDoc.currentPeriodEnd || new Date(subDoc.currentPeriodEnd) <= new Date()) {
+      return res.status(400).json({
+        message: "Your billing period has ended. Renew your plan before activating pending students.",
+        code: "PLAN_EXPIRED",
+      });
+    }
+
+    const pendingCount = await countPendingActivationStudents(schoolId);
+    if (pendingCount < 1) {
+      return res.status(400).json({
+        message: "There are no pending students to activate.",
+        code: "NO_PENDING_STUDENTS",
+      });
+    }
+
+    const pricePerYear = await getPricePerStudentYearInr();
+    const { amountInr: resolvedInr } = await resolvePendingStudentsAmountInr(
+      schoolId,
+      pendingCount,
+      subDoc,
+      pricePerYear
+    );
+    let amountInr = Math.max(1, resolvedInr);
+    const unitAmountPaise = Math.max(50, Math.round(amountInr * 100));
+
+    const productId = stripeProductId();
+    if (!productId) {
+      return res.status(503).json({
+        message: "Missing STRIPE_PRODUCT_ID — use the same Product as subscription checkout",
+      });
+    }
+
+    const customerId = await ensureStripeCustomerForSchoolCheckout(stripe, subDoc, school);
+
+    const base = webAppBase();
+    const sessionConfig = {
+      mode: "payment",
+      customer: customerId,
+      // Same catalog Product as subscription (recurring prices) so Checkout settles as domestic INR like /subscription.
+      locale: "en",
+      line_items: [
+        {
+          price_data: {
+            currency: "inr",
+            product: productId,
+            unit_amount: unitAmountPaise,
+          },
+          quantity: 1,
+        },
+      ],
+      metadata: {
+        type: "pending_students",
+        school_id: school._id.toString(),
+        schoolId: school._id.toString(),
+      },
+      // Statement / PI description (also used for India export reporting when the payer is non-IN).
+      payment_intent_data: {
+        description: `Student seat activation, prorated (${pendingCount} seat(s)) — ${school.name}`,
+        metadata: {
+          type: "pending_students",
+          school_id: school._id.toString(),
+          schoolId: school._id.toString(),
+        },
+      },
+      success_url: `${base}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${base}/payment-cancel`,
+    };
+
+    applyStripeCheckoutBillingAndPayments(sessionConfig);
+
+    let session;
+    try {
+      session = await stripe.checkout.sessions.create(sessionConfig);
+    } catch (firstErr) {
+      const msg = String(firstErr?.message || "");
+      if (
+        sessionConfig.automatic_payment_methods &&
+        (msg.includes("automatic_payment_methods") || firstErr?.param === "automatic_payment_methods")
+      ) {
+        delete sessionConfig.automatic_payment_methods;
+        session = await stripe.checkout.sessions.create(sessionConfig);
+      } else {
+        throw firstErr;
+      }
+    }
+
+    if (!subDoc.stripeCustomerId) {
+      subDoc.stripeCustomerId = customerId;
+      await subDoc.save();
+    }
+
+    return res.json({ url: session.url });
+  } catch (err) {
+    console.error("createPendingStudentsCheckout:", err);
+    return res.status(500).json({ message: err.message || "Could not create checkout session" });
+  }
+};
+
+/**
  * Raw body webhook — mounted separately in server.js
  */
 exports.handleStripeWebhook = async (req, res) => {
@@ -766,6 +1070,10 @@ exports.handleStripeWebhook = async (req, res) => {
         break;
       case "checkout.session.completed": {
         const session = event.data.object;
+        if (session.mode === "payment" && session.metadata?.type === "pending_students") {
+          await handlePendingStudentsCheckoutCompleted(session);
+          break;
+        }
         if (session.mode === "subscription" && session.subscription) {
           const subId =
             typeof session.subscription === "string" ? session.subscription : session.subscription.id;

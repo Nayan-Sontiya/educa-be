@@ -26,7 +26,7 @@ const studentSchema = new mongoose.Schema(
     },
     status: {
       type: String,
-      enum: ["active", "inactive"],
+      enum: ["active", "inactive", "pending"],
       default: "active",
     },
     /** When school subscription is active: `included` counts toward paid seats; `pending_purchase` awaits admin proration checkout. */
@@ -58,6 +58,11 @@ const studentSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
       required: true,
+    },
+    /** Temporarily holds the SMS text (phone + message) to be sent once the school activates this pending student via payment. Cleared after send. */
+    pendingCredentialsSms: {
+      phone: { type: String, default: null },
+      message: { type: String, default: null },
     },
   },
   { timestamps: true }

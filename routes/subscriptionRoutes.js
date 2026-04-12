@@ -5,6 +5,12 @@ const roleCheck = require("../middleware/roleMiddleware");
 const subscriptionController = require("../controllers/subscriptionController");
 const subscriptionAdminController = require("../controllers/subscriptionAdminController");
 
+/** Public: Stripe catalog for marketing / pricing section (no auth). */
+router.get(
+  "/public-catalog",
+  subscriptionController.getPublicSubscriptionCatalog
+);
+
 router.post(
   "/checkout",
   protect,
@@ -31,6 +37,13 @@ router.get(
   protect,
   roleCheck(["school_admin"]),
   subscriptionController.getSubscriptionCatalog
+);
+
+router.get(
+  "/pending-students-activation-quote",
+  protect,
+  roleCheck(["school_admin"]),
+  subscriptionController.getPendingStudentsActivationQuote
 );
 
 router.post(

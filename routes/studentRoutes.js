@@ -20,6 +20,7 @@ const {
   addWellbeingRecord,
   getAIAnalysis,
   getMyChildren,
+  getPendingStudentsForSchoolAdmin,
 } = require("../controllers/studentController");
 
 // Multer: memory storage for Cloudinary upload (max 5 files, 10 MB each)
@@ -45,6 +46,12 @@ router.post("/link", protect, roleCheck(["teacher", "school_admin"]), linkExisti
 // ─── Student CRUD ─────────────────────────────────────────────────────────────
 router.post("/", protect, roleCheck(["teacher", "school_admin"]), addStudentToClass);
 router.get("/by-school", protect, roleCheck(["school_admin"]), getStudentsBySchool);
+router.get(
+  "/pending-activation",
+  protect,
+  roleCheck(["school_admin"]),
+  getPendingStudentsForSchoolAdmin
+);
 router.get("/for-teacher", protect, roleCheck(["teacher"]), getStudentsForTeacher);
 router.get("/", protect, roleCheck(["teacher", "school_admin"]), getStudentsForClassSection);
 router.put("/:id", protect, roleCheck(["teacher", "school_admin"]), updateStudent);

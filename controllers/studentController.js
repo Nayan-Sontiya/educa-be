@@ -18,6 +18,11 @@ const {
   portfolioEntryCount,
 } = require("../utils/studentPortfolioResolve");
 const { seatBillingStatusForNewEnrollment } = require("../utils/studentSeatBilling");
+const {
+  isSchoolSubscriptionActivePaid,
+} = require("../utils/pendingStudentsEnrollment");
+
+const ENROLLED_STATUSES = ["active", "pending"];
 
 const escapeRegex = (value = "") =>
   value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -167,7 +172,13 @@ exports.addStudentToClass = async (req, res) => {
     const studentIdentityId = identity._id;
 
     const schoolIdForBilling = classSection.schoolId?._id ?? classSection.schoolId;
-    const seatBillingStatus = await seatBillingStatusForNewEnrollment(schoolIdForBilling);
+    const subscriptionActive = await isSchoolSubscriptionActivePaid(schoolIdForBilling);
+    let studentStatus = "active";
+    let seatBillingStatus = await seatBillingStatusForNewEnrollment(schoolIdForBilling);
+    if (subscriptionActive) {
+      studentStatus = "pending";
+      seatBillingStatus = "pending_purchase";
+    }
 
     const student = await Student.create({
       name: studentName,
@@ -178,6 +189,7 @@ exports.addStudentToClass = async (req, res) => {
       classId: classSection.classId,
       sectionId: classSection.sectionId || null,
       parentUserId: parentUser._id,
+      status: studentStatus,
       seatBillingStatus,
     });
 
@@ -187,8 +199,6 @@ exports.addStudentToClass = async (req, res) => {
       studentIdentityId,
     });
 
-    // Fire-and-forget SMS with login credentials to the parent's phone.
-    // On failure, email the school admin so they can share credentials manually.
     if (parentPhone) {
       const schoolName = classSection.schoolId?.name || "Your School";
       const schoolAdminEmail = classSection.schoolId?.email || null;
@@ -202,34 +212,43 @@ exports.addStudentToClass = async (req, res) => {
         `Password: ${plainPassword}\n` +
         `Download the UtthanAI Parent app to track your child's progress.`;
 
-      sendSms(parentPhone, smsMessage).catch((smsErr) => {
-        console.error("Failed to send SMS credentials:", smsErr.message);
-        if (schoolAdminEmail) {
-          sendMail({
-            to: schoolAdminEmail,
-            subject: `SMS delivery failed — share credentials for ${studentName}`,
-            text:
-              `The SMS with login credentials for ${studentName} could not be delivered to ${parentPhone}.\n\n` +
-              `Please share the following credentials with the parent manually:\n\n` +
-              `Student: ${studentName}${cls ? ` (${cls}${sec})` : ""}\n` +
-              `Username: ${parentUserUsername}\n` +
-              `Password: ${plainPassword}\n\n` +
-              `School: ${schoolName}`,
-            html:
-              `<p>The SMS with login credentials for <strong>${studentName}</strong> could not be delivered to <strong>${parentPhone}</strong>.</p>` +
-              `<p>Please share the following credentials with the parent manually:</p>` +
-              `<table style="border-collapse:collapse;font-family:monospace;font-size:14px;">` +
-              `<tr><td style="padding:4px 12px 4px 0;color:#555;">Student</td><td><strong>${studentName}${cls ? ` (${cls}${sec})` : ""}</strong></td></tr>` +
-              `<tr><td style="padding:4px 12px 4px 0;color:#555;">Username</td><td><strong>${parentUserUsername}</strong></td></tr>` +
-              `<tr><td style="padding:4px 12px 4px 0;color:#555;">Password</td><td><strong>${plainPassword}</strong></td></tr>` +
-              `<tr><td style="padding:4px 12px 4px 0;color:#555;">Phone</td><td>${parentPhone}</td></tr>` +
-              `</table>`,
-            logContext: "sms_failure_fallback",
-          }).catch((mailErr) =>
-            console.error("Failed to send SMS-failure fallback email:", mailErr.message)
-          );
-        }
-      });
+      if (studentStatus === "pending") {
+        // Credentials are held until the school pays and activates this student.
+        await Student.updateOne(
+          { _id: student._id },
+          { $set: { "pendingCredentialsSms.phone": parentPhone, "pendingCredentialsSms.message": smsMessage } }
+        );
+      } else {
+        // Student is immediately active — send now.
+        sendSms(parentPhone, smsMessage).catch((smsErr) => {
+          console.error("Failed to send SMS credentials:", smsErr.message);
+          if (schoolAdminEmail) {
+            sendMail({
+              to: schoolAdminEmail,
+              subject: `SMS delivery failed — share credentials for ${studentName}`,
+              text:
+                `The SMS with login credentials for ${studentName} could not be delivered to ${parentPhone}.\n\n` +
+                `Please share the following credentials with the parent manually:\n\n` +
+                `Student: ${studentName}${cls ? ` (${cls}${sec})` : ""}\n` +
+                `Username: ${parentUserUsername}\n` +
+                `Password: ${plainPassword}\n\n` +
+                `School: ${schoolName}`,
+              html:
+                `<p>The SMS with login credentials for <strong>${studentName}</strong> could not be delivered to <strong>${parentPhone}</strong>.</p>` +
+                `<p>Please share the following credentials with the parent manually:</p>` +
+                `<table style="border-collapse:collapse;font-family:monospace;font-size:14px;">` +
+                `<tr><td style="padding:4px 12px 4px 0;color:#555;">Student</td><td><strong>${studentName}${cls ? ` (${cls}${sec})` : ""}</strong></td></tr>` +
+                `<tr><td style="padding:4px 12px 4px 0;color:#555;">Username</td><td><strong>${parentUserUsername}</strong></td></tr>` +
+                `<tr><td style="padding:4px 12px 4px 0;color:#555;">Password</td><td><strong>${plainPassword}</strong></td></tr>` +
+                `<tr><td style="padding:4px 12px 4px 0;color:#555;">Phone</td><td>${parentPhone}</td></tr>` +
+                `</table>`,
+              logContext: "sms_failure_fallback",
+            }).catch((mailErr) =>
+              console.error("Failed to send SMS-failure fallback email:", mailErr.message)
+            );
+          }
+        });
+      }
     }
 
     const createdMsg = "Student account created successfully";
@@ -237,6 +256,7 @@ exports.addStudentToClass = async (req, res) => {
     res.status(201).json({
       message: createdMsg,
       student,
+      enrollmentPendingActivation: studentStatus === "pending",
       seatBillingPending: seatBillingStatus === "pending_purchase",
       parent: {
         id: parentUser._id,
@@ -372,12 +392,12 @@ exports.lookupLinkableStudents = async (req, res) => {
       }
     }
 
-    // Only return identities that have no active enrollment (removed from all schools)
+    // Only return identities that have no active/pending enrollment (removed from all schools)
     const linkable = [];
     for (const { student, studentIdentityId } of byIdentity.values()) {
       const hasActive = await Student.findOne({
         studentIdentityId,
-        status: "active",
+        status: { $in: ENROLLED_STATUSES },
       });
       if (!hasActive) {
         linkable.push({
@@ -444,7 +464,7 @@ exports.linkExistingStudentToClass = async (req, res) => {
     const existingEnrollment = await Student.findOne({
       studentIdentityId: identity._id,
       classSectionId: classSection._id,
-      status: "active",
+      status: { $in: ENROLLED_STATUSES },
     });
     if (existingEnrollment) {
       return res.status(409).json({
@@ -455,7 +475,7 @@ exports.linkExistingStudentToClass = async (req, res) => {
     // Student must be removed (soft-deleted) from any current school before linking here
     const activeEnrollmentElsewhere = await Student.findOne({
       studentIdentityId: identity._id,
-      status: "active",
+      status: { $in: ENROLLED_STATUSES },
     }).populate("schoolId", "name");
     if (activeEnrollmentElsewhere) {
       const schoolName = activeEnrollmentElsewhere.schoolId?.name || "another school";
@@ -469,7 +489,13 @@ exports.linkExistingStudentToClass = async (req, res) => {
     }).sort({ createdAt: -1 });
 
     const schoolIdForBilling = classSection.schoolId?._id ?? classSection.schoolId;
-    const seatBillingStatus = await seatBillingStatusForNewEnrollment(schoolIdForBilling);
+    const subscriptionActive = await isSchoolSubscriptionActivePaid(schoolIdForBilling);
+    let studentStatus = "active";
+    let seatBillingStatus = await seatBillingStatusForNewEnrollment(schoolIdForBilling);
+    if (subscriptionActive) {
+      studentStatus = "pending";
+      seatBillingStatus = "pending_purchase";
+    }
 
     const student = await Student.create({
       name: identity.name,
@@ -480,6 +506,7 @@ exports.linkExistingStudentToClass = async (req, res) => {
       classId: classSection.classId,
       sectionId: classSection.sectionId || null,
       parentUserId: identity.parentUserId,
+      status: studentStatus,
       seatBillingStatus,
     });
 
@@ -517,6 +544,7 @@ exports.linkExistingStudentToClass = async (req, res) => {
     res.status(201).json({
       message: linkedMsg,
       student,
+      enrollmentPendingActivation: studentStatus === "pending",
       seatBillingPending: seatBillingStatus === "pending_purchase",
     });
   } catch (error) {
@@ -586,6 +614,72 @@ exports.getStudentsBySchool = async (req, res) => {
   } catch (error) {
     console.error("getStudentsBySchool error:", error);
     res.status(500).json({ message: "Error fetching students" });
+  }
+};
+
+// School admin: students awaiting payment activation (status pending)
+exports.getPendingStudentsForSchoolAdmin = async (req, res) => {
+  try {
+    const schoolId = req.user.schoolId;
+    if (!schoolId) {
+      return res.status(403).json({
+        message: "School context required to list pending students",
+      });
+    }
+
+    const students = await Student.find({ schoolId, status: "pending" })
+      .populate("parentUserId", "name")
+      .populate("classId", "name")
+      .populate("sectionId", "name")
+      .populate("classSectionId")
+      .sort({ createdAt: -1 });
+
+    const classSectionIds = [
+      ...new Set(
+        students
+          .map((s) => s.classSectionId?._id || s.classSectionId)
+          .filter(Boolean)
+      ),
+    ];
+
+    const teacherNameByClassSection = new Map();
+    if (classSectionIds.length > 0) {
+      const assignments = await TeacherAssignment.find({
+        schoolId,
+        classSectionId: { $in: classSectionIds },
+        status: "active",
+      })
+        .populate({ path: "teacherId", populate: { path: "userId", select: "name" } })
+        .sort({ role: 1 });
+      for (const a of assignments) {
+        const csId = (a.classSectionId && a.classSectionId._id ? a.classSectionId._id : a.classSectionId).toString();
+        if (!teacherNameByClassSection.has(csId)) {
+          const name = a.teacherId?.userId?.name || a.teacherId?.name || "";
+          teacherNameByClassSection.set(csId, name);
+        }
+      }
+    }
+
+    const data = students.map((s) => {
+      const rawCs = s.classSectionId?._id || s.classSectionId;
+      const csId = rawCs ? rawCs.toString() : "";
+      return {
+        _id: s._id,
+        name: s.name,
+        rollNumber: s.rollNumber,
+        parentName: s.parentUserId?.name || "",
+        className: s.classId?.name || "",
+        sectionName: s.sectionId?.name || "",
+        classSectionId: s.classSectionId?._id || s.classSectionId,
+        teacherName: csId ? teacherNameByClassSection.get(csId) || "" : "",
+        createdAt: s.createdAt,
+      };
+    });
+
+    res.json({ data });
+  } catch (error) {
+    console.error("getPendingStudentsForSchoolAdmin error:", error);
+    res.status(500).json({ message: "Error fetching pending students" });
   }
 };
 
@@ -687,7 +781,7 @@ exports.getMyChildren = async (req, res) => {
   try {
     const parentUserId = req.user.id;
 
-    const students = await Student.find({ parentUserId })
+    const students = await Student.find({ parentUserId, status: "active" })
       .populate("classSectionId")
       .populate("classId", "name")
       .populate("sectionId", "name")
@@ -785,6 +879,15 @@ const ensureTeacherOrAdminCanAccessStudent = async (req, studentId) => {
         error: {
           status: 403,
           message: "You are not allowed to view this student's records",
+        },
+      };
+    }
+    if (student.status === "pending") {
+      return {
+        error: {
+          status: 403,
+          message:
+            "This student is pending activation by the school. You will have access after the school completes payment.",
         },
       };
     }

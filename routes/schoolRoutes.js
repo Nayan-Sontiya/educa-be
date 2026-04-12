@@ -22,6 +22,7 @@ const {
   updateSchoolGallery,
   removeGalleryImage,
 } = require("../controllers/schoolController");
+const subscriptionController = require("../controllers/subscriptionController");
 const protect = require("../middleware/authMiddleware");
 const roleCheck = require("../middleware/roleMiddleware");
 const adminAuth = () => roleCheck(["admin", "school_admin"]);
@@ -91,6 +92,13 @@ router.patch(
 
 // School admin: get school details
 router.get("/my-school", protect, adminAuth(), getMySchool);
+
+router.post(
+  "/:id/create-pending-checkout",
+  protect,
+  adminAuth(),
+  subscriptionController.createPendingStudentsCheckout
+);
 
 // School admin: update paid leave count
 router.put("/paid-leave-count", protect, adminAuth(), updatePaidLeaveCount);
