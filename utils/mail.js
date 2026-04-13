@@ -1,19 +1,23 @@
 /**
- * Transactional email via Nodemailer (SMTP).
+ * Transactional email: SMTP (Nodemailer) or Resend (HTTPS, for hosts that block 587/465).
  *
- * Required when MAIL_ENABLED=true:
+ * MAIL_ENABLED=true plus either:
+ *
+ * A) SMTP (default when MAIL_TRANSPORT is unset or smtp)
  *   SMTP_HOST, SMTP_USER, SMTP_PASS
- * Optional:
- *   SMTP_PORT (default 587), SMTP_SECURE (default false for 587)
- *   SMTP_FORCE_IPV4=true — if ETIMEDOUT on CONN (env is fine): force IPv4; common on VPS with broken IPv6
- *   MAIL_FROM — e.g. "Educa <noreply@yourdomain.com>" (defaults to SMTP_USER)
- *   APP_PUBLIC_URL — used in links and default logo URL in HTML emails
- *   MAIL_BRAND_LOGO_URL — optional full URL to logo image (overrides defaults)
- *   API_PUBLIC_URL — optional API base URL; logo served at /brand/UtthanAI final Logo.PNG
+ *   Optional: SMTP_PORT (587), SMTP_SECURE, SMTP_FORCE_IPV4=true (broken IPv6)
+ *
+ * B) Resend — set MAIL_TRANSPORT=resend (HTTPS; works when SMTP ports are blocked)
+ *   RESEND_API_KEY — required; uses official `resend` package (Node 20+)
+ *   RESEND_FROM — sender; must use a domain verified in Resend (or Resend test addresses)
+ *
+ * Shared: MAIL_FROM used as fallback for display/from where applicable
+ *   APP_PUBLIC_URL, MAIL_BRAND_LOGO_URL, API_PUBLIC_URL — HTML email / logo URLs
  */
 
 const dns = require("dns");
 const nodemailer = require("nodemailer");
+const { Resend } = require("resend");
 
 function isMailEnabled() {
   return String(process.env.MAIL_ENABLED || "").toLowerCase() === "true";
@@ -112,6 +116,102 @@ function getFromAddress() {
   return process.env.MAIL_FROM || process.env.SMTP_USER || "noreply@localhost";
 }
 
+function mailTransportMode() {
+  const raw = (process.env.MAIL_TRANSPORT || "smtp").toLowerCase().trim();
+  if (raw === "resend") return "resend";
+  return "smtp";
+}
+
+function resendEnvForLog() {
+  const key = process.env.RESEND_API_KEY;
+  const from = process.env.RESEND_FROM;
+  return {
+    MAIL_TRANSPORT: mailTransportMode(),
+    RESEND_API_KEY_set: !!key,
+    RESEND_API_KEY_length: key ? key.length : 0,
+    RESEND_FROM_set: !!(from && String(from).trim()),
+    RESEND_FROM_preview: (from || "").substring(0, 72) || "(unset)",
+  };
+}
+
+/**
+ * @param {{ to: string, subject: string, text: string, html?: string, logContext?: string }} opts
+ * @param {(a: string) => string} tag
+ */
+async function sendMailResend(opts, tag) {
+  const { to, subject, text, html } = opts;
+  const key = process.env.RESEND_API_KEY;
+  const fromRaw =
+    (process.env.RESEND_FROM && process.env.RESEND_FROM.trim()) ||
+    getFromAddress();
+
+  if (!key) {
+    console.warn(tag("SKIP resend_incomplete"), {
+      to,
+      subjectPreview: subject.substring(0, 72),
+      ...resendEnvForLog(),
+      hint: "Set RESEND_API_KEY and MAIL_TRANSPORT=resend",
+    });
+    return { skipped: true, reason: "resend_incomplete" };
+  }
+
+  const bodyHtml =
+    html ||
+    `<pre style="font-family:sans-serif;white-space:pre-wrap">${escapeHtml(text)}</pre>`;
+
+  console.log(tag("ATTEMPT resend"), {
+    to,
+    subjectPreview: subject.substring(0, 72),
+    fromPreview: fromRaw.substring(0, 72),
+    ...resendEnvForLog(),
+  });
+
+  try {
+    const resend = new Resend(key.trim());
+    const { data, error } = await resend.emails.send({
+      from: fromRaw,
+      to,
+      subject,
+      text,
+      html: bodyHtml,
+    });
+
+    if (error) {
+      const msg =
+        (error && (error.message || error.name)) || "Resend API error";
+      const err = new Error(String(msg));
+      if (error.statusCode != null) err.responseCode = error.statusCode;
+      err.response = typeof error === "object" ? JSON.stringify(error) : "";
+      console.error(tag("FAILED resend"), {
+        to,
+        subjectPreview: subject.substring(0, 72),
+        resendError: error,
+        ...resendEnvForLog(),
+      });
+      return { error: err };
+    }
+
+    const messageId = data && data.id ? String(data.id) : undefined;
+    console.log(tag("SENT resend"), {
+      to,
+      messageId,
+      subjectPreview: subject.substring(0, 72),
+    });
+    return { sent: true, messageId };
+  } catch (err) {
+    console.error(tag("FAILED resend"), {
+      to,
+      subjectPreview: subject.substring(0, 72),
+      error: err.message,
+      ...resendEnvForLog(),
+    });
+    if (err && err.stack) {
+      console.error(tag("FAILED resend stack"), err.stack);
+    }
+    return { error: err };
+  }
+}
+
 /**
  * @param {{ to: string, subject: string, text: string, html?: string, logContext?: string }} opts
  * @returns {Promise<{ sent?: boolean, skipped?: boolean, reason?: string, messageId?: string, error?: Error }>}
@@ -139,6 +239,10 @@ async function sendMail(opts) {
     return { skipped: true, reason: "mail_disabled" };
   }
 
+  if (mailTransportMode() === "resend") {
+    return sendMailResend(opts, tag);
+  }
+
   const transporter = getTransporter();
   const from = getFromAddress();
 
@@ -157,7 +261,7 @@ async function sendMail(opts) {
     return { skipped: true, reason: "smtp_incomplete" };
   }
 
-  console.log(tag("ATTEMPT"), {
+  console.log(tag("ATTEMPT smtp"), {
     to,
     subjectPreview: subject.substring(0, 72),
     fromPreview: from.substring(0, 72),
@@ -174,7 +278,7 @@ async function sendMail(opts) {
         html ||
         `<pre style="font-family:sans-serif;white-space:pre-wrap">${escapeHtml(text)}</pre>`,
     });
-    console.log(tag("SENT"), {
+    console.log(tag("SENT smtp"), {
       to,
       messageId: info.messageId,
       subjectPreview: subject.substring(0, 72),
@@ -184,15 +288,17 @@ async function sendMail(opts) {
     const fields = nodemailerErrorFields(err);
     const timedOutOnConnect =
       fields.code === "ETIMEDOUT" && fields.command === "CONN";
-    console.error(tag("FAILED"), {
+    const snap = smtpEnvForLog();
+    console.error(tag("FAILED smtp"), {
       to,
       subjectPreview: subject.substring(0, 72),
       ...fields,
-      env: smtpEnvForLog(),
+      env: snap,
       ...(timedOutOnConnect
         ? {
-            hint:
-              "TCP to SMTP never connected (not auth). Try SMTP_FORCE_IPV4=true on the server, or allow outbound 587/465, or use SendGrid/SES (HTTPS).",
+            hint: snap.SMTP_FORCE_IPV4
+              ? "Outbound SMTP is still blocked or unroutable. Use MAIL_TRANSPORT=resend + RESEND_API_KEY (HTTPS :443), or ask your host to allow TCP 587/465 to the internet."
+              : "TCP to SMTP never connected (not auth). Try SMTP_FORCE_IPV4=true, open outbound 587/465, or MAIL_TRANSPORT=resend + RESEND_API_KEY.",
           }
         : {}),
     });
