@@ -5,12 +5,14 @@
  *   SMTP_HOST, SMTP_USER, SMTP_PASS
  * Optional:
  *   SMTP_PORT (default 587), SMTP_SECURE (default false for 587)
+ *   SMTP_FORCE_IPV4=true — if ETIMEDOUT on CONN (env is fine): force IPv4; common on VPS with broken IPv6
  *   MAIL_FROM — e.g. "Educa <noreply@yourdomain.com>" (defaults to SMTP_USER)
  *   APP_PUBLIC_URL — used in links and default logo URL in HTML emails
  *   MAIL_BRAND_LOGO_URL — optional full URL to logo image (overrides defaults)
  *   API_PUBLIC_URL — optional API base URL; logo served at /brand/UtthanAI final Logo.PNG
  */
 
+const dns = require("dns");
 const nodemailer = require("nodemailer");
 
 function isMailEnabled() {
@@ -33,6 +35,8 @@ function smtpEnvForLog() {
   const port = parseInt(portRaw, 10);
   const secure =
     process.env.SMTP_SECURE === "true" || String(port) === "465";
+  const forceIpv4 =
+    String(process.env.SMTP_FORCE_IPV4 || "").toLowerCase() === "true";
 
   return {
     MAIL_ENABLED_raw: process.env.MAIL_ENABLED,
@@ -49,6 +53,7 @@ function smtpEnvForLog() {
     SMTP_PASS_length: pass ? pass.length : 0,
     MAIL_FROM_set: !!process.env.MAIL_FROM,
     MAIL_FROM_preview: (process.env.MAIL_FROM || "").substring(0, 72) || "(unset)",
+    SMTP_FORCE_IPV4: forceIpv4,
   };
 }
 
@@ -83,12 +88,24 @@ function getTransporter() {
   const secure =
     process.env.SMTP_SECURE === "true" || String(port) === "465";
 
-  return nodemailer.createTransport({
+  const forceIpv4 =
+    String(process.env.SMTP_FORCE_IPV4 || "").toLowerCase() === "true";
+  const lookup = forceIpv4
+    ? (hostname, opts, cb) =>
+        dns.lookup(hostname, { ...(opts || {}), family: 4 }, cb)
+    : undefined;
+
+  const transport = {
     host,
     port,
     secure,
     auth: { user, pass },
-  });
+  };
+  if (lookup) {
+    transport.lookup = lookup;
+  }
+
+  return nodemailer.createTransport(transport);
 }
 
 function getFromAddress() {
@@ -164,11 +181,20 @@ async function sendMail(opts) {
     });
     return { sent: true, messageId: info.messageId };
   } catch (err) {
+    const fields = nodemailerErrorFields(err);
+    const timedOutOnConnect =
+      fields.code === "ETIMEDOUT" && fields.command === "CONN";
     console.error(tag("FAILED"), {
       to,
       subjectPreview: subject.substring(0, 72),
-      ...nodemailerErrorFields(err),
+      ...fields,
       env: smtpEnvForLog(),
+      ...(timedOutOnConnect
+        ? {
+            hint:
+              "TCP to SMTP never connected (not auth). Try SMTP_FORCE_IPV4=true on the server, or allow outbound 587/465, or use SendGrid/SES (HTTPS).",
+          }
+        : {}),
     });
     if (err && err.stack) {
       console.error(tag("FAILED stack"), err.stack);
