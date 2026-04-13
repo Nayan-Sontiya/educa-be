@@ -56,15 +56,20 @@ exports.create = async (req, res) => {
       `Open in admin: ${dashboardUrl}\n` +
       `Submission id: ${doc._id}`;
 
-    try {
-      await sendMail({
-        to,
-        subject,
-        text,
-        logContext: "contact_form",
+    const mailResult = await sendMail({
+      to,
+      subject,
+      text,
+      logContext: "contact_form",
+    });
+    if (mailResult?.error) {
+      console.error("[contact] notify mail failed (message still saved)", {
+        contactId: doc._id.toString(),
+        notifyTo: to,
+        errorMessage: mailResult.error.message,
+        errorCode: mailResult.error.code,
+        responseCode: mailResult.error.responseCode,
       });
-    } catch (mailErr) {
-      console.error("[contact] notify mail error:", mailErr);
     }
 
     return res.status(201).json({

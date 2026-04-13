@@ -17,6 +17,57 @@ function isMailEnabled() {
   return String(process.env.MAIL_ENABLED || "").toLowerCase() === "true";
 }
 
+function maskEmailForLog(email) {
+  if (!email || typeof email !== "string") return null;
+  const at = email.indexOf("@");
+  if (at < 1) return "(invalid)";
+  return `***@${email.slice(at + 1)}`;
+}
+
+/** Safe SMTP-related env for logs (no passwords). */
+function smtpEnvForLog() {
+  const host = process.env.SMTP_HOST;
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+  const portRaw = process.env.SMTP_PORT || "587";
+  const port = parseInt(portRaw, 10);
+  const secure =
+    process.env.SMTP_SECURE === "true" || String(port) === "465";
+
+  return {
+    MAIL_ENABLED_raw: process.env.MAIL_ENABLED,
+    mailEnabledParsed: isMailEnabled(),
+    SMTP_HOST: host ? host : "(empty)",
+    SMTP_HOST_set: !!host,
+    SMTP_PORT_raw: portRaw,
+    SMTP_PORT_parsed: Number.isFinite(port) ? port : `(invalid: ${portRaw})`,
+    SMTP_SECURE_raw: process.env.SMTP_SECURE ?? "(unset)",
+    secureComputed: secure,
+    SMTP_USER_set: !!user,
+    SMTP_USER_mask: maskEmailForLog(user),
+    SMTP_PASS_set: !!pass,
+    SMTP_PASS_length: pass ? pass.length : 0,
+    MAIL_FROM_set: !!process.env.MAIL_FROM,
+    MAIL_FROM_preview: (process.env.MAIL_FROM || "").substring(0, 72) || "(unset)",
+  };
+}
+
+function nodemailerErrorFields(err) {
+  if (!err || typeof err !== "object") return {};
+  return {
+    name: err.name,
+    message: err.message,
+    code: err.code,
+    errno: err.errno,
+    syscall: err.syscall,
+    address: err.address,
+    port: err.port,
+    command: err.command,
+    responseCode: err.responseCode,
+    response: err.response,
+  };
+}
+
 function getTransporter() {
   if (!isMailEnabled()) return null;
 
@@ -66,6 +117,7 @@ async function sendMail(opts) {
     console.log(tag("SKIP mail_disabled"), {
       to,
       subjectPreview: subject.substring(0, 72),
+      env: { MAIL_ENABLED_raw: process.env.MAIL_ENABLED },
     });
     return { skipped: true, reason: "mail_disabled" };
   }
@@ -77,10 +129,23 @@ async function sendMail(opts) {
     console.warn(tag("SKIP smtp_incomplete"), {
       to,
       subjectPreview: subject.substring(0, 72),
+      ...smtpEnvForLog(),
+      missing: {
+        SMTP_HOST: !process.env.SMTP_HOST,
+        SMTP_USER: !process.env.SMTP_USER,
+        SMTP_PASS: !process.env.SMTP_PASS,
+      },
       hint: "Set SMTP_HOST, SMTP_USER, SMTP_PASS when MAIL_ENABLED=true",
     });
     return { skipped: true, reason: "smtp_incomplete" };
   }
+
+  console.log(tag("ATTEMPT"), {
+    to,
+    subjectPreview: subject.substring(0, 72),
+    fromPreview: from.substring(0, 72),
+    ...smtpEnvForLog(),
+  });
 
   try {
     const info = await transporter.sendMail({
@@ -102,8 +167,12 @@ async function sendMail(opts) {
     console.error(tag("FAILED"), {
       to,
       subjectPreview: subject.substring(0, 72),
-      error: err.message,
+      ...nodemailerErrorFields(err),
+      env: smtpEnvForLog(),
     });
+    if (err && err.stack) {
+      console.error(tag("FAILED stack"), err.stack);
+    }
     return { error: err };
   }
 }
