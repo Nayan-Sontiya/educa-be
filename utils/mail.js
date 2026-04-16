@@ -3,13 +3,13 @@
  *
  * MAIL_ENABLED=true plus either:
  *
- * A) SMTP (default when MAIL_TRANSPORT is unset or smtp)
+ * A) SMTP — when MAIL_TRANSPORT=smtp, or when MAIL_TRANSPORT is unset and RESEND_API_KEY is not set
  *   SMTP_HOST, SMTP_USER, SMTP_PASS
  *   Optional: SMTP_PORT (587), SMTP_SECURE, SMTP_FORCE_IPV4=true (broken IPv6)
  *
- * B) Resend — set MAIL_TRANSPORT=resend (HTTPS; works when SMTP ports are blocked)
- *   RESEND_API_KEY — required; uses official `resend` package (Node 20+)
- *   RESEND_FROM — sender; must use a domain verified in Resend (or Resend test addresses)
+ * B) Resend (HTTPS) — when MAIL_TRANSPORT=resend, or when RESEND_API_KEY is set (unless MAIL_TRANSPORT=smtp)
+ *   RESEND_API_KEY — required for Resend; uses official `resend` package
+ *   RESEND_FROM — sender; domain verified in Resend (or Resend test addresses)
  *
  * Shared: MAIL_FROM used as fallback for display/from where applicable
  *   APP_PUBLIC_URL, MAIL_BRAND_LOGO_URL, API_PUBLIC_URL — HTML email / logo URLs
@@ -45,6 +45,8 @@ function smtpEnvForLog() {
   return {
     MAIL_ENABLED_raw: process.env.MAIL_ENABLED,
     mailEnabledParsed: isMailEnabled(),
+    MAIL_TRANSPORT_env: process.env.MAIL_TRANSPORT || "(unset)",
+    effectiveTransport: mailTransportMode(),
     SMTP_HOST: host ? host : "(empty)",
     SMTP_HOST_set: !!host,
     SMTP_PORT_raw: portRaw,
@@ -116,9 +118,13 @@ function getFromAddress() {
   return process.env.MAIL_FROM || process.env.SMTP_USER || "noreply@localhost";
 }
 
+/** @returns {"smtp" | "resend"} */
 function mailTransportMode() {
-  const raw = (process.env.MAIL_TRANSPORT || "smtp").toLowerCase().trim();
+  const raw = (process.env.MAIL_TRANSPORT || "").toLowerCase().trim();
   if (raw === "resend") return "resend";
+  if (raw === "smtp") return "smtp";
+  const key = process.env.RESEND_API_KEY;
+  if (key && String(key).trim()) return "resend";
   return "smtp";
 }
 
@@ -126,7 +132,8 @@ function resendEnvForLog() {
   const key = process.env.RESEND_API_KEY;
   const from = process.env.RESEND_FROM;
   return {
-    MAIL_TRANSPORT: mailTransportMode(),
+    MAIL_TRANSPORT_env: process.env.MAIL_TRANSPORT || "(unset)",
+    effectiveTransport: mailTransportMode(),
     RESEND_API_KEY_set: !!key,
     RESEND_API_KEY_length: key ? key.length : 0,
     RESEND_FROM_set: !!(from && String(from).trim()),
@@ -150,7 +157,7 @@ async function sendMailResend(opts, tag) {
       to,
       subjectPreview: subject.substring(0, 72),
       ...resendEnvForLog(),
-      hint: "Set RESEND_API_KEY and MAIL_TRANSPORT=resend",
+      hint: "Set RESEND_API_KEY (and RESEND_FROM for production). MAIL_TRANSPORT=resend is optional if the key is set.",
     });
     return { skipped: true, reason: "resend_incomplete" };
   }
@@ -182,11 +189,18 @@ async function sendMailResend(opts, tag) {
       const err = new Error(String(msg));
       if (error.statusCode != null) err.responseCode = error.statusCode;
       err.response = typeof error === "object" ? JSON.stringify(error) : "";
+      const msgLower = String(msg).toLowerCase();
+      const domainHint =
+        error.statusCode === 403 &&
+        (msgLower.includes("not verified") || msgLower.includes("domain"))
+          ? "Add the sender domain in Resend → Domains, publish DNS records, wait for Verified. Or use RESEND_FROM with an already-verified domain (dev: onboarding@resend.dev per Resend docs)."
+          : undefined;
       console.error(tag("FAILED resend"), {
         to,
         subjectPreview: subject.substring(0, 72),
         resendError: error,
         ...resendEnvForLog(),
+        ...(domainHint ? { hint: domainHint } : {}),
       });
       return { error: err };
     }
@@ -297,8 +311,8 @@ async function sendMail(opts) {
       ...(timedOutOnConnect
         ? {
             hint: snap.SMTP_FORCE_IPV4
-              ? "Outbound SMTP is still blocked or unroutable. Use MAIL_TRANSPORT=resend + RESEND_API_KEY (HTTPS :443), or ask your host to allow TCP 587/465 to the internet."
-              : "TCP to SMTP never connected (not auth). Try SMTP_FORCE_IPV4=true, open outbound 587/465, or MAIL_TRANSPORT=resend + RESEND_API_KEY.",
+              ? "Outbound SMTP is still blocked or unroutable. Set RESEND_API_KEY + RESEND_FROM (HTTPS :443), or ask your host to allow TCP 587/465 to the internet."
+              : "TCP to SMTP never connected (not auth). Try SMTP_FORCE_IPV4=true, open outbound 587/465, or set RESEND_API_KEY (+ RESEND_FROM) to use Resend.",
           }
         : {}),
     });
@@ -347,6 +361,7 @@ function brandLogoImgHtml() {
 
 module.exports = {
   isMailEnabled,
+  mailTransportMode,
   sendMail,
   escapeHtml,
   appBaseUrl,
