@@ -640,7 +640,7 @@ async function handleInvoicePaymentFailed(stripe, invoice) {
     await sendMail({
       to: school.email,
       subject: "Payment failed — subscription access paused",
-      text: `Your Utthan/Educa subscription payment did not go through. Staff and parent access is paused until payment succeeds. The school admin can update the payment method or complete payment from the school billing dashboard.`,
+      text: `Your Utthan subscription payment did not go through. Staff and parent access is paused until payment succeeds. The school admin can update the payment method or complete payment from the school billing dashboard.`,
       logContext: "subscription_payment_failed",
     });
   }
