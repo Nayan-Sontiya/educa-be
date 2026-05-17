@@ -3,11 +3,13 @@
  * For local testing of AI analysis, charts, and parent/teacher feedback views.
  *
  * Usage:
- *   node scripts/seedPortfolioWeeks.js [studentMongoId] [--clear]
+ *   yarn seed:portfolio [studentMongoId] [--clear]
+ *
+ * If studentMongoId is omitted, uses the first active student in the DB.
  *
  * Examples:
- *   node scripts/seedPortfolioWeeks.js 69a7fd94ceef9efb4ae005d5
- *   node scripts/seedPortfolioWeeks.js 69a7fd94ceef9efb4ae005d5 --clear
+ *   yarn seed:portfolio
+ *   yarn seed:portfolio <studentId> --clear
  *
  * Requires MONGO_URI in .env (same as the API server).
  */
@@ -67,10 +69,46 @@ function ratingForPct(pct) {
   return "needs_attention";
 }
 
+async function listSampleStudents(limit = 8) {
+  const rows = await Student.find({ status: { $ne: "inactive" } })
+    .select("_id name rollNumber classId")
+    .sort({ updatedAt: -1 })
+    .limit(limit)
+    .lean();
+  return rows;
+}
+
+async function resolveStudent(studentIdArg) {
+  if (studentIdArg) {
+    const student = await Student.findById(studentIdArg);
+    if (student) return student;
+    console.error("Student not found:", studentIdArg);
+    const samples = await listSampleStudents();
+    if (samples.length) {
+      console.error("\nRecent students in this database:");
+      samples.forEach((s) => {
+        console.error(`  ${s._id}  ${s.name || "(no name)"}${s.rollNumber ? `  roll ${s.rollNumber}` : ""}`);
+      });
+      console.error("\nRe-run: yarn seed:portfolio <studentId>");
+    } else {
+      console.error("No students in DB. Create a student in the app first, or run yarn seed:dev-school");
+    }
+    process.exit(1);
+  }
+
+  const student = await Student.findOne({ status: { $ne: "inactive" } }).sort({ updatedAt: -1 });
+  if (!student) {
+    console.error("No students in database. Add a student in the app, then run yarn seed:portfolio again.");
+    process.exit(1);
+  }
+  console.log("No student id passed — using most recently updated student:", student._id.toString(), student.name || "");
+  return student;
+}
+
 async function main() {
   const args = process.argv.slice(2).filter((a) => a !== "--clear");
   const clear = process.argv.includes("--clear");
-  const studentId = args[0] || "69a7fd94ceef9efb4ae005d5";
+  const studentIdArg = args[0] || process.env.SEED_STUDENT_ID || null;
 
   if (!process.env.MONGO_URI) {
     console.error("Missing MONGO_URI in .env");
@@ -80,11 +118,8 @@ async function main() {
   await mongoose.connect(process.env.MONGO_URI);
   console.log("Connected to MongoDB");
 
-  const student = await Student.findById(studentId);
-  if (!student) {
-    console.error("Student not found:", studentId);
-    process.exit(1);
-  }
+  const student = await resolveStudent(studentIdArg);
+  const studentId = student._id.toString();
 
   const portfolio = await resolvePortfolioForStudent(
     student,
@@ -202,8 +237,10 @@ async function main() {
     wellbeing: portfolio.wellbeing.length,
   };
 
+  console.log("Student:", student.name || studentId);
   console.log("Done. Portfolio totals:", counts);
   console.log(`GET http://localhost:5000/api/students/${studentId}/portfolio`);
+  console.log(`GET http://localhost:5000/api/students/${studentId}/portfolio/analysis`);
   await mongoose.disconnect();
 }
 

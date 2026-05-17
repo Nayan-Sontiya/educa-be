@@ -210,6 +210,8 @@ Emotional risk: ${JSON.stringify(emotionalRisk)}
   `.trim();
 
   let aiInsights = [];
+  let aiSource = "openai";
+  let aiUnavailableReason = null;
   try {
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
@@ -230,7 +232,16 @@ Emotional risk: ${JSON.stringify(emotionalRisk)}
     const parsed = JSON.parse(raw);
     aiInsights = Array.isArray(parsed.insights) ? parsed.insights : Object.values(parsed)[0] || [];
   } catch (err) {
+    const status = err?.status ?? err?.response?.status;
     console.error("OpenAI analysis error:", err.message);
+    aiSource = "fallback";
+    if (status === 429) {
+      aiUnavailableReason = "quota_exceeded";
+    } else if (status === 401) {
+      aiUnavailableReason = "invalid_api_key";
+    } else {
+      aiUnavailableReason = "openai_error";
+    }
     aiInsights = generateFallbackInsights(academicTrend, behaviorTrend, skillTrend, emotionalRisk);
   }
 
@@ -242,6 +253,8 @@ Emotional risk: ${JSON.stringify(emotionalRisk)}
     trends: { academic: academicTrend, behavior: behaviorTrend, skill: skillTrend },
     emotionalRisk,
     aiInsights,
+    aiSource,
+    ...(aiUnavailableReason ? { aiUnavailableReason } : {}),
   };
 };
 
