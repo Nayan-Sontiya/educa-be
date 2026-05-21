@@ -51,6 +51,10 @@ const schoolSchema = new mongoose.Schema(
     reviewNote: { type: String, trim: true },
     /** Set when platform admin first moves school to Verified; trial window starts here. */
     verifiedAt: { type: Date },
+    /** Platform admin: this school never gets a free trial (must subscribe after verification). */
+    freeTrialDisabled: { type: Boolean, default: false },
+    /** Platform admin: explicit trial end (extend or end early). Overrides default weeks when set. */
+    trialEndsAtOverride: { type: Date },
     udiseVerified: { type: Boolean, default: false },
     // OTP for mobile verification (dev only)
     otp: {

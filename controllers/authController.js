@@ -12,6 +12,7 @@ const {
 const { normalizePhone } = require("../utils/phone");
 const { normalizeUsername } = require("../utils/username");
 const Teacher = require("../models/Teacher");
+const { assertParentCanAuthenticate } = require("../utils/pendingStudentAccess");
 
 exports.registerUser = async (req, res) => {
   try {
@@ -172,6 +173,16 @@ exports.loginUser = async (req, res) => {
 
     if (user.isBlocked === true) {
       return res.status(403).json({ message: "Your account has been blocked" });
+    }
+
+    if (user.role === "parent") {
+      const parentAccess = await assertParentCanAuthenticate(user._id);
+      if (!parentAccess.allowed) {
+        return res.status(403).json({
+          message: parentAccess.message,
+          code: parentAccess.code,
+        });
+      }
     }
 
     // 👇 Check teacher status if role is teacher

@@ -102,6 +102,20 @@ router.get(
   subscriptionAdminController.listSchoolSubscriptions
 );
 
+router.get(
+  "/admin/trial-schools",
+  protect,
+  roleCheck(["admin"]),
+  subscriptionAdminController.listSchoolsTrial
+);
+
+router.patch(
+  "/admin/schools/:schoolId/trial",
+  protect,
+  roleCheck(["admin"]),
+  subscriptionAdminController.patchSchoolTrial
+);
+
 router.patch(
   "/admin/schools/:schoolId",
   protect,

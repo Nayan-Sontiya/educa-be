@@ -8,6 +8,7 @@ const {
   isSchoolSubscriptionSuspended,
   getSchoolBillingAccess,
 } = require("../utils/subscriptionAccess");
+const { assertParentCanAuthenticate } = require("../utils/pendingStudentAccess");
 
 /**
  * School admin can reach subscription checkout and minimal profile routes when access is blocked
@@ -52,6 +53,16 @@ const protect = async (req, res, next) => {
     }
     if (user.isBlocked === true) {
       return res.status(403).json({ message: "Your account has been blocked" });
+    }
+
+    if (user.role === "parent") {
+      const parentAccess = await assertParentCanAuthenticate(user._id);
+      if (!parentAccess.allowed) {
+        return res.status(403).json({
+          message: parentAccess.message,
+          code: parentAccess.code,
+        });
+      }
     }
 
     if (user.role === "school_admin" && user.schoolId) {

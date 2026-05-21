@@ -157,6 +157,8 @@ exports.createCheckoutSession = async (req, res) => {
         verificationStatus: school.verificationStatus,
         verifiedAt: school.verifiedAt,
         createdAt: school.createdAt,
+        freeTrialDisabled: school.freeTrialDisabled,
+        trialEndsAtOverride: school.trialEndsAtOverride,
       },
     });
     if (trialAccess.inTrial) {
@@ -307,7 +309,7 @@ exports.getSubscriptionStatus = async (req, res) => {
 
     const billing = await getBillingSettingsDoc();
     const school = await School.findById(user.schoolId)
-      .select("name email verificationStatus verifiedAt createdAt")
+      .select("name email verificationStatus verifiedAt createdAt freeTrialDisabled trialEndsAtOverride")
       .lean();
     const trialAccess = await getSchoolBillingAccess(user.schoolId, { school });
 
@@ -643,7 +645,7 @@ async function handlePaymentFailed(payload) {
     await sendMail({
       to: school.email,
       subject: "Payment failed — subscription access paused",
-      text: `Your Utthan subscription payment did not go through. Staff and parent access is paused until payment succeeds. The school admin can complete payment from the school billing dashboard.`,
+      text: `Your UtthanAI subscription payment did not go through. Staff and parent access is paused until payment succeeds. The school admin can complete payment from the school billing dashboard.`,
       logContext: "subscription_payment_failed",
     });
   }

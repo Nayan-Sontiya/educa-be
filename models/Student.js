@@ -73,6 +73,7 @@ studentSchema.index(
   { classSectionId: 1, rollNumber: 1 },
   { unique: true, sparse: true }
 );
+studentSchema.index({ parentUserId: 1, status: 1 });
 
 module.exports = mongoose.model("Student", studentSchema);
 

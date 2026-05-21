@@ -1,11 +1,85 @@
 const School = require("../models/School");
 const SchoolSubscription = require("../models/SchoolSubscription");
+const BillingSettings = require("../models/BillingSettings");
 
 /** Subscription states that allow access after the school-level free trial ends. */
 const PAID_ACCESS_STATUSES = ["active", "trialing"];
 
 function hasRazorpaySubscriptionId(sub) {
   return Boolean(sub?.razorpaySubscriptionId && String(sub.razorpaySubscriptionId).trim());
+}
+
+function envDefaultTrialWeeks() {
+  const weeks = Number(process.env.SCHOOL_TRIAL_WEEKS);
+  if (!Number.isFinite(weeks) || weeks < 0) return 4;
+  return weeks;
+}
+
+async function loadGlobalBillingSettings() {
+  let doc = await BillingSettings.findById("global").lean();
+  if (!doc) {
+    return {
+      _id: "global",
+      freeTrialEnabled: true,
+      defaultTrialWeeks: envDefaultTrialWeeks(),
+      pricePerStudentYearInr: Number(process.env.SUBSCRIPTION_PRICE_PER_STUDENT_YEAR_INR) || 300,
+    };
+  }
+  return {
+    ...doc,
+    freeTrialEnabled: doc.freeTrialEnabled !== false,
+    defaultTrialWeeks:
+      doc.defaultTrialWeeks != null ? Number(doc.defaultTrialWeeks) : envDefaultTrialWeeks(),
+  };
+}
+
+/**
+ * Resolve when the school free trial ends (not subscription period end).
+ * @param {object|null} school lean school with verifiedAt, freeTrialDisabled, trialEndsAtOverride
+ * @param {object|null} billing global BillingSettings lean
+ */
+function computeTrialEndsAt(school, billing) {
+  if (!school?.verifiedAt) return null;
+
+  const verifiedAt = new Date(school.verifiedAt);
+  if (Number.isNaN(verifiedAt.getTime())) return null;
+
+  const globalTrialOff = billing?.freeTrialEnabled === false;
+  const schoolTrialOff = Boolean(school.freeTrialDisabled);
+
+  if (globalTrialOff || schoolTrialOff) {
+    return verifiedAt;
+  }
+
+  if (school.trialEndsAtOverride) {
+    const override = new Date(school.trialEndsAtOverride);
+    if (!Number.isNaN(override.getTime())) return override;
+  }
+
+  const weeks =
+    billing?.defaultTrialWeeks != null ? Number(billing.defaultTrialWeeks) : envDefaultTrialWeeks();
+  if (!Number.isFinite(weeks) || weeks <= 0) {
+    return verifiedAt;
+  }
+
+  return new Date(verifiedAt.getTime() + weeks * 7 * 24 * 60 * 60 * 1000);
+}
+
+/** @deprecated Use computeTrialEndsAt with billing settings */
+function trialEndsAtFromSchool(school) {
+  return computeTrialEndsAt(school, {
+    freeTrialEnabled: true,
+    defaultTrialWeeks: envDefaultTrialWeeks(),
+  });
+}
+
+function trialDurationMs(billing) {
+  const weeks =
+    billing?.defaultTrialWeeks != null ? Number(billing.defaultTrialWeeks) : envDefaultTrialWeeks();
+  if (!Number.isFinite(weeks) || weeks < 0) {
+    return 4 * 7 * 24 * 60 * 60 * 1000;
+  }
+  return weeks * 7 * 24 * 60 * 60 * 1000;
 }
 
 /**
@@ -25,29 +99,22 @@ function subscriptionAnchoredAfterSchoolTrial(sub, trialEndsAtDate) {
   return false;
 }
 
-function trialDurationMs() {
-  const weeks = Number(process.env.SCHOOL_TRIAL_WEEKS) || 4;
-  if (!Number.isFinite(weeks) || weeks < 0) {
-    return 4 * 7 * 24 * 60 * 60 * 1000;
-  }
-  return weeks * 7 * 24 * 60 * 60 * 1000;
-}
+const SCHOOL_TRIAL_SELECT =
+  "verificationStatus verifiedAt createdAt freeTrialDisabled trialEndsAtOverride";
 
-function trialEndsAtFromSchool(school) {
-  if (!school?.verifiedAt) return null;
-  const start = new Date(school.verifiedAt).getTime();
-  if (Number.isNaN(start)) return null;
-  return new Date(start + trialDurationMs());
+async function loadSchoolForTrial(schoolId, partialSchool) {
+  if (partialSchool && partialSchool.verificationStatus !== undefined) {
+    return {
+      freeTrialDisabled: false,
+      trialEndsAtOverride: undefined,
+      ...partialSchool,
+    };
+  }
+  return School.findById(schoolId).select(SCHOOL_TRIAL_SELECT).lean();
 }
 
 /**
  * True if this school must be blocked from API/login (subscription suspended).
- * Admin bypass window overrides suspension until adminUnblockUntil.
- *
- * `SchoolSubscription.status === "inactive"` alone is not enough: access during the
- * school-level free trial (from School.verifiedAt) is governed by getSchoolBillingAccess.
- * Otherwise a bulk "set all subscriptions inactive" would emit SUBSCRIPTION_SUSPENDED
- * even while the trial window is still open.
  */
 async function isSchoolSubscriptionSuspended(schoolId) {
   if (!schoolId) return false;
@@ -58,16 +125,16 @@ async function isSchoolSubscriptionSuspended(schoolId) {
   }
   if (sub.status !== "inactive") return false;
 
-  const school = await School.findById(schoolId)
-    .select("verificationStatus verifiedAt")
-    .lean();
+  const school = await School.findById(schoolId).select(SCHOOL_TRIAL_SELECT).lean();
   if (!school || school.verificationStatus !== "Verified") {
     return false;
   }
   if (!school.verifiedAt) {
     return false;
   }
-  const trialEndsAt = trialEndsAtFromSchool(school);
+
+  const billing = await loadGlobalBillingSettings();
+  const trialEndsAt = computeTrialEndsAt(school, billing);
   if (trialEndsAt && Date.now() <= trialEndsAt.getTime()) {
     return false;
   }
@@ -76,12 +143,8 @@ async function isSchoolSubscriptionSuspended(schoolId) {
 }
 
 /**
- * After a school is Verified, allow API access for SCHOOL_TRIAL_WEEKS (default 4) from verifiedAt.
- * After that, require status active or admin unblock (no grace period).
- * Schools Verified before verifiedAt existed are grandfathered (allowed) until verifiedAt is set.
- *
- * @param {import("mongoose").Types.ObjectId|string|null|undefined} schoolId
- * @param {{ school?: import("mongoose").LeanDocument<any>|null }} [options] Lean school doc to avoid an extra read
+ * After a school is Verified, allow API access during free trial (unless disabled).
+ * After trial, require paid subscription or admin unblock.
  */
 async function getSchoolBillingAccess(schoolId, options = {}) {
   if (!schoolId) {
@@ -90,21 +153,20 @@ async function getSchoolBillingAccess(schoolId, options = {}) {
       inTrial: false,
       trialEndsAt: null,
       needsSubscription: false,
+      freeTrialDisabled: false,
     };
   }
 
-  let school = options.school;
-  if (!school) {
-    school = await School.findById(schoolId)
-      .select("verificationStatus verifiedAt createdAt")
-      .lean();
-  }
+  const billing = options.billing || (await loadGlobalBillingSettings());
+  let school = await loadSchoolForTrial(schoolId, options.school);
+
   if (!school) {
     return {
       allowed: true,
       inTrial: false,
       trialEndsAt: null,
       needsSubscription: false,
+      freeTrialDisabled: false,
     };
   }
   if (school.verificationStatus !== "Verified") {
@@ -113,6 +175,7 @@ async function getSchoolBillingAccess(schoolId, options = {}) {
       inTrial: false,
       trialEndsAt: null,
       needsSubscription: false,
+      freeTrialDisabled: Boolean(school.freeTrialDisabled),
     };
   }
 
@@ -122,30 +185,33 @@ async function getSchoolBillingAccess(schoolId, options = {}) {
       inTrial: false,
       trialEndsAt: null,
       needsSubscription: false,
+      freeTrialDisabled: Boolean(school.freeTrialDisabled),
     };
   }
 
-  const trialEndsAt = trialEndsAtFromSchool(school);
+  const trialEndsAt = computeTrialEndsAt(school, billing);
   if (!trialEndsAt) {
     return {
       allowed: true,
       inTrial: false,
       trialEndsAt: null,
       needsSubscription: false,
+      freeTrialDisabled: Boolean(school.freeTrialDisabled),
     };
   }
 
   const trialEndMs = trialEndsAt.getTime();
   const now = Date.now();
+  const globalTrialOff = billing.freeTrialEnabled === false;
+  const schoolTrialOff = Boolean(school.freeTrialDisabled);
 
-  // School-level trial from verifiedAt: full app access, but Razorpay checkout stays disabled
-  // until this window ends (even if Mongo still has a subscription row from tests).
-  if (now <= trialEndMs) {
+  if (now <= trialEndMs && !globalTrialOff && !schoolTrialOff) {
     return {
       allowed: true,
       inTrial: true,
       trialEndsAt: trialEndsAt.toISOString(),
       needsSubscription: false,
+      freeTrialDisabled: false,
     };
   }
 
@@ -157,6 +223,7 @@ async function getSchoolBillingAccess(schoolId, options = {}) {
       inTrial: false,
       trialEndsAt: trialEndsAt.toISOString(),
       needsSubscription: false,
+      freeTrialDisabled: schoolTrialOff || globalTrialOff,
     };
   }
 
@@ -166,6 +233,7 @@ async function getSchoolBillingAccess(schoolId, options = {}) {
       inTrial: false,
       trialEndsAt: trialEndsAt.toISOString(),
       needsSubscription: false,
+      freeTrialDisabled: schoolTrialOff || globalTrialOff,
     };
   }
 
@@ -177,13 +245,18 @@ async function getSchoolBillingAccess(schoolId, options = {}) {
     inTrial: false,
     trialEndsAt: trialEndsAt.toISOString(),
     needsSubscription: true,
+    freeTrialDisabled: schoolTrialOff || globalTrialOff,
   };
 }
 
 module.exports = {
   isSchoolSubscriptionSuspended,
   getSchoolBillingAccess,
+  computeTrialEndsAt,
   trialEndsAtFromSchool,
   trialDurationMs,
   subscriptionAnchoredAfterSchoolTrial,
+  loadGlobalBillingSettings,
+  envDefaultTrialWeeks,
+  SCHOOL_TRIAL_SELECT,
 };

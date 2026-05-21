@@ -248,7 +248,7 @@ async function createRazorpayPlan(plan, pricePerStudentYearInr) {
     period,
     interval,
     item: {
-      name: `Utthan school subscription — ${plan}`,
+      name: `UtthanAI school subscription — ${plan}`,
       amount: unitPaise,
       currency: "INR",
       description: `Per included student seat, billed ${meta.intervalLabel}`,
@@ -323,7 +323,7 @@ async function loadSubscriptionCatalogPrices(includedSeatCount, pricePerStudentY
     dashboardPlansMatched: dashboardMatchCount,
     product: {
       id: "utthan-school-subscription",
-      name: "Utthan school subscription",
+      name: "UtthanAI school subscription",
       description: "Per-seat billing for verified schools (INR)",
     },
     prices,

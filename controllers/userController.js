@@ -42,7 +42,10 @@ exports.getCurrentUser = async (req, res) => {
   try {
     const user = await User.findById(req.user.id)
       .select("-password")
-      .populate("schoolId", "name verificationStatus verifiedAt");
+      .populate(
+        "schoolId",
+        "name verificationStatus verifiedAt freeTrialDisabled trialEndsAtOverride"
+      );
     if (!user) {
       return res.status(404).json({ message: "User not found" });
     }
@@ -58,6 +61,8 @@ exports.getCurrentUser = async (req, res) => {
                 verificationStatus: user.schoolId.verificationStatus,
                 verifiedAt: user.schoolId.verifiedAt,
                 createdAt: user.schoolId.createdAt,
+                freeTrialDisabled: user.schoolId.freeTrialDisabled,
+                trialEndsAtOverride: user.schoolId.trialEndsAtOverride,
               }
             : null;
         const billing = await getSchoolBillingAccess(sid, { school: schoolLean });
