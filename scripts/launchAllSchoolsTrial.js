@@ -6,7 +6,7 @@
  * 2) SchoolSubscription: status "active" → "trialing"
  * 3) SchoolSubscription: status "grace" → "trialing" (clears grace* fields)
  *
- * Does not call Stripe. Run once before/after go-live.
+ * Does not call Razorpay. Run once before/after go-live.
  *
  * To end trial for all schools (e.g. test “trial over, no payment”):
  *   node scripts/endSchoolTrialForAllSchools.js

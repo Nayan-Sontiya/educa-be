@@ -1,5 +1,5 @@
 /**
- * All amounts in INR *minor* units (paise) for Stripe (INR uses paise).
+ * All amounts in INR *minor* units (paise) for Razorpay (INR uses paise).
  * ₹1 = 100 paise.
  */
 
@@ -16,15 +16,16 @@ function planAmountPaise(plan, studentCount, pricePerStudentYearInr) {
   throw new Error("Invalid plan");
 }
 
-function stripeIntervalForPlan(plan) {
-  if (plan === "monthly") return { interval: "month", interval_count: 1 };
-  if (plan === "quarterly") return { interval: "month", interval_count: 3 };
-  if (plan === "yearly") return { interval: "year", interval_count: 1 };
+/** Razorpay plan API: period + interval (count). */
+function razorpayIntervalForPlan(plan) {
+  if (plan === "monthly") return { period: "monthly", interval: 1 };
+  if (plan === "quarterly") return { period: "monthly", interval: 3 };
+  if (plan === "yearly") return { period: "yearly", interval: 1 };
   throw new Error("Invalid plan");
 }
 
 module.exports = {
   yearlyTotalPaise,
   planAmountPaise,
-  stripeIntervalForPlan,
+  razorpayIntervalForPlan,
 };

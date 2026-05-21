@@ -3,7 +3,7 @@ const Student = require("../models/Student");
 const SchoolSubscription = require("../models/SchoolSubscription");
 const BillingSettings = require("../models/BillingSettings");
 const { planAmountPaise } = require("./subscriptionPricing");
-const { getStripe } = require("./subscriptionPendingSeatsStripe");
+const { fetchSubscription, fetchRazorpayPlan } = require("./razorpayService");
 const { countIncludedSeatStudents } = require("./studentSeatBilling");
 
 /**
@@ -36,7 +36,7 @@ async function getPricePerStudentYearInr() {
 }
 
 /**
- * Prorated INR for pending students for the rest of the **current Stripe billing period**.
+ * Prorated INR for pending students for the rest of the **current billing period**.
  *
  * Uses `SchoolSubscription.plan` (monthly | quarterly | yearly) and global
  * `pricePerStudentYearInr` the same way as `/subscription/status` (via planAmountPaise).
@@ -84,13 +84,11 @@ function calculatePendingStudentsAmount(pendingCount, subscriptionLike, pricePer
 }
 
 /**
- * Preferred: prorate using the **live Stripe subscription** line item (catalog prices are dynamic).
- * - per_seat: Price `unit_amount` is per seat per billing period → × pending × time fraction.
- * - dynamic_total: quantity is 1 and `unit_amount` is the period total → split by current included seat count.
+ * Preferred: prorate using the **live Razorpay subscription** (plan amount × quantity).
  *
- * Falls back to `calculatePendingStudentsAmount` if Stripe is unavailable or retrieval fails.
+ * Falls back to `calculatePendingStudentsAmount` if Razorpay is unavailable or retrieval fails.
  *
- * @returns {{ amountInr: number, source: 'stripe' | 'catalog_fallback' | 'none' }}
+ * @returns {{ amountInr: number, source: 'razorpay' | 'catalog_fallback' | 'none' }}
  */
 async function resolvePendingStudentsAmountInr(
   schoolId,
@@ -102,27 +100,31 @@ async function resolvePendingStudentsAmountInr(
     return { amountInr: 0, source: "none" };
   }
 
-  const stripe = getStripe();
-  const subId = subscriptionLike?.stripeSubscriptionId;
-  if (stripe && subId) {
+  const subId = subscriptionLike?.razorpaySubscriptionId;
+  if (subId) {
     try {
-      const stripeSub = await stripe.subscriptions.retrieve(subId, {
-        expand: ["items.data.price"],
-      });
-      const item = stripeSub.items?.data?.[0];
-      const price = item?.price;
-      if (price && price.unit_amount != null && price.unit_amount >= 1) {
-        const periodStart = new Date(stripeSub.current_period_start * 1000);
-        const periodEnd = new Date(stripeSub.current_period_end * 1000);
+      const rzpSub = await fetchSubscription(subId);
+      const plan = rzpSub?.plan_id ? await fetchRazorpayPlan(rzpSub.plan_id) : null;
+      const unitMinor = plan?.item?.amount != null ? Number(plan.item.amount) : null;
+      if (unitMinor != null && unitMinor >= 1) {
+        const periodStart = rzpSub.current_start
+          ? new Date(rzpSub.current_start * 1000)
+          : subscriptionLike?.currentPeriodStart
+            ? new Date(subscriptionLike.currentPeriodStart)
+            : null;
+        const periodEnd = rzpSub.current_end
+          ? new Date(rzpSub.current_end * 1000)
+          : subscriptionLike?.currentPeriodEnd
+            ? new Date(subscriptionLike.currentPeriodEnd)
+            : null;
         const now = new Date();
-        if (periodEnd > now) {
+        if (periodEnd && periodEnd > now && periodStart) {
           const periodMs = periodEnd.getTime() - periodStart.getTime();
           const remainingMs = Math.max(0, periodEnd.getTime() - now.getTime());
           const fraction =
             periodMs > 0 ? Math.min(1, Math.max(0, remainingMs / periodMs)) : 0;
 
-          const unitMinor = price.unit_amount;
-          const qty = item.quantity || 1;
+          const qty = Number(rzpSub.quantity) || 1;
           const mode = subscriptionLike.billingMode;
 
           let fullPeriodOneSeatInr;
@@ -130,7 +132,7 @@ async function resolvePendingStudentsAmountInr(
             fullPeriodOneSeatInr = unitMinor / 100;
           } else if (mode === "dynamic_total") {
             const seats = Math.max(1, await countIncludedSeatStudents(schoolId));
-            fullPeriodOneSeatInr = unitMinor / 100 / seats;
+            fullPeriodOneSeatInr = (unitMinor * qty) / 100 / seats;
           } else {
             fullPeriodOneSeatInr =
               qty > 1
@@ -140,12 +142,12 @@ async function resolvePendingStudentsAmountInr(
 
           return {
             amountInr: Math.round(pendingCount * fullPeriodOneSeatInr * fraction),
-            source: "stripe",
+            source: "razorpay",
           };
         }
       }
     } catch (e) {
-      console.error("resolvePendingStudentsAmountInr (Stripe):", e.message || e);
+      console.error("resolvePendingStudentsAmountInr (Razorpay):", e.message || e);
     }
   }
 

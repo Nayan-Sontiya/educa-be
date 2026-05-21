@@ -1,0 +1,520 @@
+const crypto = require("crypto");
+const Razorpay = require("razorpay");
+const { planAmountPaise, razorpayIntervalForPlan } = require("./subscriptionPricing");
+
+const PLAN_KEYS = ["monthly", "quarterly", "yearly"];
+
+/** Cache Razorpay plan list (same idea as live Stripe price list). */
+const PLAN_SYNC_TTL_MS = Number(process.env.RAZORPAY_PLAN_SYNC_TTL_MS) || 120000;
+let _planSyncCache = { at: 0, byPlan: null };
+
+function razorpayKeyId() {
+  const k = process.env.RAZORPAY_KEY_ID;
+  return typeof k === "string" ? k.trim() : "";
+}
+
+function razorpayKeySecret() {
+  const k = process.env.RAZORPAY_KEY_SECRET;
+  return typeof k === "string" ? k.trim() : "";
+}
+
+function webhookSecret() {
+  return (
+    process.env.WEBHOOK_SECRET ||
+    process.env.RAZORPAY_WEBHOOK_SECRET ||
+    ""
+  ).trim();
+}
+
+function isRazorpayConfigured() {
+  return Boolean(razorpayKeyId() && razorpayKeySecret());
+}
+
+/**
+ * Razorpay requires total_count >= 1 when end_at is omitted.
+ * Use a high cycle count; schools can cancel early via API (like Stripe until-cancelled).
+ * Max 1200 per Razorpay docs.
+ */
+function subscriptionTotalCount() {
+  const n = Number(process.env.RAZORPAY_SUBSCRIPTION_TOTAL_COUNT);
+  if (Number.isFinite(n) && n >= 1) return Math.min(1200, Math.floor(n));
+  return 1200;
+}
+
+let _client = null;
+
+function getRazorpay() {
+  if (!isRazorpayConfigured()) return null;
+  if (!_client) {
+    _client = new Razorpay({
+      key_id: razorpayKeyId(),
+      key_secret: razorpayKeySecret(),
+    });
+  }
+  return _client;
+}
+
+function envPlanId(plan) {
+  const key = `RAZORPAY_PLAN_${String(plan).toUpperCase()}_ID`;
+  const v = process.env[key];
+  return typeof v === "string" ? v.trim() : "";
+}
+
+function verifyWebhookSignature(rawBody, signature) {
+  const secret = webhookSecret();
+  if (!secret || !signature) return false;
+  const body = Buffer.isBuffer(rawBody) ? rawBody : Buffer.from(String(rawBody));
+  const expected = crypto.createHmac("sha256", secret).update(body).digest("hex");
+  return expected === signature;
+}
+
+function verifySubscriptionPaymentSignature({
+  razorpay_payment_id,
+  razorpay_subscription_id,
+  razorpay_signature,
+}) {
+  const secret = razorpayKeySecret();
+  if (!secret || !razorpay_payment_id || !razorpay_subscription_id || !razorpay_signature) {
+    return false;
+  }
+  const payload = `${razorpay_payment_id}|${razorpay_subscription_id}`;
+  const expected = crypto.createHmac("sha256", secret).update(payload).digest("hex");
+  return expected === razorpay_signature;
+}
+
+function verifyOrderPaymentSignature({
+  razorpay_payment_id,
+  razorpay_order_id,
+  razorpay_signature,
+}) {
+  const secret = razorpayKeySecret();
+  if (!secret || !razorpay_payment_id || !razorpay_order_id || !razorpay_signature) {
+    return false;
+  }
+  const payload = `${razorpay_payment_id}|${razorpay_order_id}`;
+  const expected = crypto.createHmac("sha256", secret).update(payload).digest("hex");
+  return expected === razorpay_signature;
+}
+
+function planDisplayMeta(plan) {
+  if (plan === "monthly") return { intervalLabel: "per month", period: "monthly", interval: 1 };
+  if (plan === "quarterly") return { intervalLabel: "per quarter", period: "monthly", interval: 3 };
+  if (plan === "yearly") return { intervalLabel: "per year", period: "yearly", interval: 1 };
+  return { intervalLabel: "per period", period: "monthly", interval: 1 };
+}
+
+async function fetchRazorpayPlan(planId) {
+  const rzp = getRazorpay();
+  if (!rzp || !planId) return null;
+  try {
+    return await rzp.plans.fetch(planId);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Map a Razorpay plan to monthly | quarterly | yearly.
+ * Priority: notes.plan → item name keywords → period + interval.
+ */
+function inferPlanKeyFromRazorpayPlan(rzpPlan) {
+  if (!rzpPlan) return null;
+
+  const notes = rzpPlan.notes || {};
+  const notePlan = String(notes.plan || notes.cadence || notes.billing_plan || "")
+    .trim()
+    .toLowerCase();
+  if (PLAN_KEYS.includes(notePlan)) return notePlan;
+
+  const name = String(rzpPlan.item?.name || "").toLowerCase();
+  if (/\bmonthly\b/.test(name) && !/\bquarter/.test(name)) return "monthly";
+  if (/\bquarter/.test(name)) return "quarterly";
+  if (/\b(yearly|annual)\b/.test(name)) return "yearly";
+
+  const period = String(rzpPlan.period || "").toLowerCase();
+  const interval = Number(rzpPlan.interval) || 1;
+  if (period === "monthly" && interval === 1) return "monthly";
+  if (period === "monthly" && interval === 3) return "quarterly";
+  if (period === "yearly" && interval === 1) return "yearly";
+
+  return null;
+}
+
+function intervalLabelFromRazorpayPlan(rzpPlan, fallbackPlan) {
+  if (!rzpPlan) return planDisplayMeta(fallbackPlan).intervalLabel;
+  const period = String(rzpPlan.period || "").toLowerCase();
+  const ic = Number(rzpPlan.interval) || 1;
+  if (period === "monthly" && ic === 1) return "per month";
+  if (period === "monthly" && ic === 3) return "per quarter";
+  if (period === "yearly" && ic === 1) return "per year";
+  if (ic === 1) return `per ${period}`;
+  return `every ${ic} ${period}s`;
+}
+
+function planPreferScore(rzpPlan, planKey) {
+  let score = 0;
+  const notes = rzpPlan.notes || {};
+  if (String(notes.plan || "").toLowerCase() === planKey) score += 100;
+  if (String(rzpPlan.item?.name || "").toLowerCase().includes(planKey)) score += 10;
+  if (String(rzpPlan.id || "").length) score += 1;
+  return score;
+}
+
+/** Paginate GET /plans — all INR recurring plans on the Razorpay account. */
+async function fetchAllRazorpayPlansFromApi() {
+  const rzp = getRazorpay();
+  if (!rzp) return [];
+
+  const all = [];
+  let skip = 0;
+  const pageSize = 100;
+
+  for (;;) {
+    const page = await rzp.plans.all({ count: pageSize, skip });
+    const items = page?.items || [];
+    all.push(...items);
+    if (items.length < pageSize) break;
+    skip += pageSize;
+    if (skip > 500) break;
+  }
+
+  return all.filter((p) => {
+    const cur = String(p?.item?.currency || "INR").toUpperCase();
+    return cur === "INR" && p?.item?.amount != null && Number(p.item.amount) >= 1;
+  });
+}
+
+/**
+ * Sync monthly / quarterly / yearly from Razorpay Dashboard (like Stripe catalog fetch).
+ * Env RAZORPAY_PLAN_*_ID overrides auto-match when set.
+ *
+ * @returns {Promise<Map<string, object>>} plan key → Razorpay plan entity
+ */
+async function syncRazorpayPlansByCadence({ force = false } = {}) {
+  if (
+    !force &&
+    _planSyncCache.byPlan &&
+    Date.now() - _planSyncCache.at < PLAN_SYNC_TTL_MS
+  ) {
+    return _planSyncCache.byPlan;
+  }
+
+  const map = new Map();
+
+  try {
+    const allPlans = await fetchAllRazorpayPlansFromApi();
+    for (const rzpPlan of allPlans) {
+      const key = inferPlanKeyFromRazorpayPlan(rzpPlan);
+      if (!key) continue;
+
+      const existing = map.get(key);
+      if (!existing || planPreferScore(rzpPlan, key) > planPreferScore(existing, key)) {
+        map.set(key, rzpPlan);
+      }
+    }
+  } catch (err) {
+    console.error("[razorpay] syncRazorpayPlansByCadence:", err.message || err);
+  }
+
+  for (const planKey of PLAN_KEYS) {
+    const envId = envPlanId(planKey);
+    if (!envId) continue;
+    const fetched = await fetchRazorpayPlan(envId);
+    if (fetched) map.set(planKey, fetched);
+  }
+
+  _planSyncCache = { at: Date.now(), byPlan: map };
+  return map;
+}
+
+function planSourceForCatalog(planKey, rzpPlan) {
+  if (!rzpPlan) return "computed";
+  if (envPlanId(planKey) && rzpPlan.id === envPlanId(planKey)) return "env";
+  return "razorpay_dashboard";
+}
+
+/**
+ * Create a Razorpay plan for per-seat billing (unit amount = one student for the period).
+ */
+async function createRazorpayPlan(plan, pricePerStudentYearInr) {
+  const rzp = getRazorpay();
+  if (!rzp) throw new Error("Razorpay is not configured");
+
+  const { period, interval } = razorpayIntervalForPlan(plan);
+  const unitPaise = planAmountPaise(plan, 1, pricePerStudentYearInr);
+  const meta = planDisplayMeta(plan);
+
+  const created = await rzp.plans.create({
+    period,
+    interval,
+    item: {
+      name: `Utthan school subscription — ${plan}`,
+      amount: unitPaise,
+      currency: "INR",
+      description: `Per included student seat, billed ${meta.intervalLabel}`,
+    },
+    notes: { plan, billingUnit: "per_seat" },
+  });
+
+  return created;
+}
+
+async function resolvePlanId(plan, pricePerStudentYearInr) {
+  const synced = await syncRazorpayPlansByCadence();
+  const fromDashboard = synced.get(plan);
+  if (fromDashboard?.id) return fromDashboard.id;
+
+  const created = await createRazorpayPlan(plan, pricePerStudentYearInr);
+  console.warn(
+    `[razorpay] No dashboard plan matched "${plan}" — created ${created.id}. ` +
+      `Add notes.plan="${plan}" on your Razorpay plan, or set RAZORPAY_PLAN_${plan.toUpperCase()}_ID=${created.id}.`
+  );
+  synced.set(plan, created);
+  _planSyncCache = { at: Date.now(), byPlan: synced };
+  return created.id;
+}
+
+/**
+ * Catalog rows for monthly / quarterly / yearly (per-seat unit amounts).
+ */
+async function loadSubscriptionCatalogPrices(includedSeatCount, pricePerStudentYearInr) {
+  if (!isRazorpayConfigured()) {
+    return { razorpayConfigured: false, plansSyncedFromDashboard: false, product: null, prices: [] };
+  }
+
+  const synced = await syncRazorpayPlansByCadence();
+  const prices = [];
+  let dashboardMatchCount = 0;
+
+  for (const plan of PLAN_KEYS) {
+    const fallbackPaise = planAmountPaise(plan, 1, pricePerStudentYearInr);
+    const meta = planDisplayMeta(plan);
+    const razorpayPlan = synced.get(plan) || null;
+
+    if (razorpayPlan?.id) dashboardMatchCount += 1;
+
+    const unitMinor =
+      razorpayPlan?.item?.amount != null ? Number(razorpayPlan.item.amount) : fallbackPaise;
+
+    const intervalLabel = razorpayPlan
+      ? intervalLabelFromRazorpayPlan(razorpayPlan, plan)
+      : meta.intervalLabel;
+
+    prices.push({
+      id: razorpayPlan?.id || plan,
+      plan,
+      nickname: razorpayPlan?.item?.name || `School plan — ${plan}`,
+      currency: "inr",
+      unitAmountMinor: unitMinor,
+      unitAmountInr: unitMinor / 100,
+      interval: razorpayPlan?.period || meta.period,
+      intervalCount: razorpayPlan?.interval != null ? Number(razorpayPlan.interval) : meta.interval,
+      intervalLabel,
+      totalForSchoolInr:
+        includedSeatCount >= 1 ? (unitMinor * includedSeatCount) / 100 : null,
+      razorpayPlanId: razorpayPlan?.id || null,
+      planSource: planSourceForCatalog(plan, razorpayPlan),
+    });
+  }
+
+  return {
+    razorpayConfigured: true,
+    plansSyncedFromDashboard: dashboardMatchCount > 0,
+    dashboardPlansMatched: dashboardMatchCount,
+    product: {
+      id: "utthan-school-subscription",
+      name: "Utthan school subscription",
+      description: "Per-seat billing for verified schools (INR)",
+    },
+    prices,
+  };
+}
+
+function customerPayloadFromSchool(school) {
+  const payload = {
+    name: school.name.trim(),
+    fail_existing: "0",
+    notes: {
+      schoolId: school._id.toString(),
+      source: "educa_subscription",
+    },
+  };
+  const em = school.email?.trim();
+  if (em) payload.email = em;
+  if (school.phone?.trim()) payload.contact = school.phone.trim();
+  return payload;
+}
+
+function isDuplicateCustomerError(err) {
+  const msg = String(err?.error?.description || err?.message || "").toLowerCase();
+  return msg.includes("customer already exists");
+}
+
+/** Find existing Razorpay customer by email when create returns duplicate error. */
+async function findRazorpayCustomerByEmail(email) {
+  const rzp = getRazorpay();
+  if (!rzp || !email?.trim()) return null;
+
+  const target = email.trim().toLowerCase();
+  let skip = 0;
+
+  for (;;) {
+    const page = await rzp.customers.all({ count: 100, skip });
+    const items = page?.items || [];
+    const hit = items.find((c) => String(c.email || "").trim().toLowerCase() === target);
+    if (hit?.id) return hit;
+
+    if (items.length < 100) break;
+    skip += 100;
+    if (skip > 500) break;
+  }
+
+  return null;
+}
+
+async function createOrReuseRazorpayCustomer(payload) {
+  const rzp = getRazorpay();
+  try {
+    const customer = await rzp.customers.create(payload);
+    return customer;
+  } catch (err) {
+    if (!isDuplicateCustomerError(err) || !payload.email) throw err;
+
+    const existing = await findRazorpayCustomerByEmail(payload.email);
+    if (existing?.id) return existing;
+
+    throw err;
+  }
+}
+
+async function ensureRazorpayCustomer(subDoc, school) {
+  const rzp = getRazorpay();
+  if (!rzp) throw new Error("Razorpay is not configured");
+
+  const payload = customerPayloadFromSchool(school);
+
+  if (subDoc.razorpayCustomerId) {
+    try {
+      await rzp.customers.edit(subDoc.razorpayCustomerId, payload);
+      return subDoc.razorpayCustomerId;
+    } catch (editErr) {
+      console.warn(
+        "[razorpay] customers.edit failed, re-resolving customer:",
+        editErr?.error?.description || editErr?.message
+      );
+    }
+  }
+
+  const customer = await createOrReuseRazorpayCustomer(payload);
+  return customer.id;
+}
+
+/**
+ * Create Razorpay subscription (status: created). Frontend opens Checkout with subscription_id.
+ */
+async function createSchoolSubscription({
+  plan,
+  planId,
+  quantity,
+  customerId,
+  schoolId,
+  mongoSubscriptionId,
+}) {
+  const rzp = getRazorpay();
+  if (!rzp) throw new Error("Razorpay is not configured");
+
+  const subscription = await rzp.subscriptions.create({
+    plan_id: planId,
+    customer_id: customerId,
+    quantity: Math.max(1, quantity),
+    customer_notify: 1,
+    total_count: subscriptionTotalCount(),
+    notes: {
+      schoolId: String(schoolId),
+      plan,
+      mongoSubscriptionId: String(mongoSubscriptionId),
+      billedSeatQuantity: String(quantity),
+    },
+  });
+
+  return subscription;
+}
+
+async function fetchSubscription(subscriptionId) {
+  const rzp = getRazorpay();
+  if (!rzp || !subscriptionId) return null;
+  return rzp.subscriptions.fetch(subscriptionId);
+}
+
+async function updateSubscriptionQuantity(subscriptionId, quantity) {
+  const rzp = getRazorpay();
+  if (!rzp) throw new Error("Razorpay is not configured");
+  return rzp.subscriptions.update(subscriptionId, {
+    quantity: Math.max(1, quantity),
+    schedule_change_at: "now",
+  });
+}
+
+async function cancelSubscription(subscriptionId, cancelAtCycleEnd = false) {
+  const rzp = getRazorpay();
+  if (!rzp) throw new Error("Razorpay is not configured");
+  return rzp.subscriptions.cancel(subscriptionId, cancelAtCycleEnd);
+}
+
+async function createPendingStudentsOrder({ amountPaise, schoolId, pendingCount }) {
+  const rzp = getRazorpay();
+  if (!rzp) throw new Error("Razorpay is not configured");
+
+  return rzp.orders.create({
+    amount: Math.max(100, amountPaise),
+    currency: "INR",
+    receipt: `pending_${String(schoolId).slice(-8)}_${Date.now()}`,
+    notes: {
+      type: "pending_students",
+      school_id: String(schoolId),
+      schoolId: String(schoolId),
+      pending_count: String(pendingCount),
+    },
+  });
+}
+
+function mapRazorpaySubscriptionStatus(rzpStatus) {
+  const s = String(rzpStatus || "").toLowerCase();
+  if (s === "active" || s === "authenticated") return "active";
+  if (s === "created" || s === "pending") return "pending";
+  return "inactive";
+}
+
+function periodBoundsFromRazorpaySubscription(rzpSub) {
+  const startSec = rzpSub?.current_start;
+  const endSec = rzpSub?.current_end;
+  return {
+    currentPeriodStart: startSec ? new Date(startSec * 1000) : undefined,
+    currentPeriodEnd: endSec ? new Date(endSec * 1000) : undefined,
+  };
+}
+
+module.exports = {
+  PLAN_KEYS,
+  razorpayKeyId,
+  isRazorpayConfigured,
+  getRazorpay,
+  webhookSecret,
+  verifyWebhookSignature,
+  verifySubscriptionPaymentSignature,
+  verifyOrderPaymentSignature,
+  envPlanId,
+  inferPlanKeyFromRazorpayPlan,
+  syncRazorpayPlansByCadence,
+  resolvePlanId,
+  loadSubscriptionCatalogPrices,
+  ensureRazorpayCustomer,
+  createSchoolSubscription,
+  fetchSubscription,
+  updateSubscriptionQuantity,
+  cancelSubscription,
+  createPendingStudentsOrder,
+  mapRazorpaySubscriptionStatus,
+  periodBoundsFromRazorpaySubscription,
+  fetchRazorpayPlan,
+};

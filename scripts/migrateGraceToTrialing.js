@@ -1,5 +1,5 @@
 /**
- * Legacy status "grace" → "trialing". Clears grace* fields. Does not call Stripe.
+ * Legacy status "grace" → "trialing". Clears grace* fields. Does not call Razorpay.
  *
  * Usage (educa-be root, MONGO_URI in .env):
  *   node scripts/migrateGraceToTrialing.js --dry-run

@@ -1,7 +1,7 @@
 /**
- * Remove local SchoolSubscription rows that never completed Stripe checkout
- * (status incomplete and no stripeSubscriptionId). Safe for clearing dev/test noise.
- * Does not call Stripe — cancel test subs in Stripe Dashboard separately if needed.
+ * Remove local SchoolSubscription rows that never completed Razorpay checkout
+ * (status inactive/pending and no razorpaySubscriptionId). Safe for clearing dev/test noise.
+ * Does not call Razorpay — cancel test subs in the Razorpay Dashboard separately if needed.
  *
  * Usage (from educa-be, MONGO_URI in .env):
  *   node scripts/cleanupIncompleteSubscriptions.js --dry-run
@@ -22,16 +22,16 @@ async function main() {
   await mongoose.connect(uri);
 
   const filter = {
-    status: "inactive",
+    status: { $in: ["inactive", "pending"] },
     $or: [
-      { stripeSubscriptionId: { $exists: false } },
-      { stripeSubscriptionId: null },
-      { stripeSubscriptionId: "" },
+      { razorpaySubscriptionId: { $exists: false } },
+      { razorpaySubscriptionId: null },
+      { razorpaySubscriptionId: "" },
     ],
   };
 
   const count = await SchoolSubscription.countDocuments(filter);
-  console.log(`Matching incomplete subscriptions (no Stripe id): ${count}`);
+  console.log(`Matching incomplete subscriptions (no Razorpay id): ${count}`);
 
   if (dryRun) {
     console.log("Dry run — no deletes.");

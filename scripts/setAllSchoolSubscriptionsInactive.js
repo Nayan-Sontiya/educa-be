@@ -1,6 +1,6 @@
 /**
  * Set every SchoolSubscription.status to "inactive".
- * Does not cancel subscriptions in Stripe — use the Dashboard if billing must match.
+ * Does not cancel subscriptions in Razorpay — use the Dashboard if billing must match.
  *
  * Usage (from educa-be root, MONGO_URI in .env):
  *   node scripts/setAllSchoolSubscriptionsInactive.js --dry-run

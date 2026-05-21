@@ -5,7 +5,7 @@ const roleCheck = require("../middleware/roleMiddleware");
 const subscriptionController = require("../controllers/subscriptionController");
 const subscriptionAdminController = require("../controllers/subscriptionAdminController");
 
-/** Public: Stripe catalog for marketing / pricing section (no auth). */
+/** Public: Razorpay catalog for marketing / pricing section (no auth). */
 router.get(
   "/public-catalog",
   subscriptionController.getPublicSubscriptionCatalog
@@ -19,10 +19,38 @@ router.post(
 );
 
 router.post(
+  "/verify-payment",
+  protect,
+  roleCheck(["school_admin"]),
+  subscriptionController.verifyPayment
+);
+
+router.post(
+  "/sync-from-razorpay",
+  protect,
+  roleCheck(["school_admin"]),
+  subscriptionController.syncSubscriptionFromRazorpay
+);
+
+router.post(
   "/confirm-session",
   protect,
   roleCheck(["school_admin"]),
   subscriptionController.confirmCheckoutSession
+);
+
+router.post(
+  "/verify-pending-payment",
+  protect,
+  roleCheck(["school_admin"]),
+  subscriptionController.verifyPendingStudentsPayment
+);
+
+router.post(
+  "/cancel",
+  protect,
+  roleCheck(["school_admin"]),
+  subscriptionController.cancelSchoolSubscription
 );
 
 router.get(
@@ -50,7 +78,7 @@ router.post(
   "/sync-student-count",
   protect,
   roleCheck(["school_admin"]),
-  subscriptionController.syncStudentCountToStripe
+  subscriptionController.syncStudentCount
 );
 
 router.get(

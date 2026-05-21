@@ -1,6 +1,6 @@
 // server.js
 const path = require("path");
-// override: true — if STRIPE_* (etc.) exist in the OS env as empty placeholders, dotenv
+// override: true — if RAZORPAY_* (etc.) exist in the OS env as empty placeholders, dotenv
 // would otherwise skip them and leave secrets missing.
 require("dotenv").config({ path: path.join(__dirname, ".env"), override: true });
 
@@ -12,11 +12,11 @@ const app = express();
 
 const subscriptionController = require("./controllers/subscriptionController");
 
-// Stripe webhook must receive raw body (before express.json)
+// Razorpay webhook must receive raw body (before express.json)
 app.post(
   "/api/subscription/webhook",
   express.raw({ type: "application/json" }),
-  (req, res) => subscriptionController.handleStripeWebhook(req, res)
+  (req, res) => subscriptionController.handleRazorpayWebhook(req, res)
 );
 
 // Middlewares

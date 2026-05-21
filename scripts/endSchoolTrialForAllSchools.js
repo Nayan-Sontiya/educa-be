@@ -5,7 +5,7 @@
  * trial as finished (uses SCHOOL_TRIAL_WEEKS from env, default 4, same as subscriptionAccess.js).
  *
  * Optional: simulate "trial ended, no payment" by resetting each school's SchoolSubscription
- * to incomplete and clearing Stripe fields (does NOT cancel subscriptions in Stripe — do that
+ * to inactive and clearing Razorpay fields (does NOT cancel subscriptions in Razorpay — do that
  * in Dashboard if needed).
  *
  * Usage (educa-be root, MONGO_URI in .env):
@@ -103,9 +103,10 @@ async function main() {
         },
         $unset: {
           plan: "",
-          stripeCustomerId: "",
-          stripeSubscriptionId: "",
-          stripePriceId: "",
+          razorpayCustomerId: "",
+          razorpaySubscriptionId: "",
+          razorpayPaymentId: "",
+          razorpayPlanId: "",
           currentPeriodStart: "",
           currentPeriodEnd: "",
           lastPaymentAt: "",
@@ -117,12 +118,12 @@ async function main() {
         },
       },
     );
-    console.log("SchoolSubscription reset (incomplete, Stripe fields cleared):", {
+    console.log("SchoolSubscription reset (inactive, Razorpay fields cleared):", {
       matchedCount: subRes.matchedCount,
       modifiedCount: subRes.modifiedCount,
     });
     console.warn(
-      "Stripe may still have live subscriptions — cancel in Stripe Dashboard if you need billing to match.",
+      "Razorpay may still have live subscriptions — cancel in Razorpay Dashboard if you need billing to match.",
     );
   }
 

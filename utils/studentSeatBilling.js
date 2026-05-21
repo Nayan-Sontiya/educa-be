@@ -2,7 +2,7 @@ const mongoose = require("mongoose");
 const Student = require("../models/Student");
 const SchoolSubscription = require("../models/SchoolSubscription");
 
-/** Students that count toward the purchased Stripe seat quantity */
+/** Students that count toward the purchased subscription seat quantity */
 const includedSeatMatch = {
   $or: [{ seatBillingStatus: { $exists: false } }, { seatBillingStatus: "included" }],
 };

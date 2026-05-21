@@ -1,5 +1,4 @@
 const mongoose = require("mongoose");
-const Stripe = require("stripe");
 const School = require("../models/School");
 const SchoolSubscription = require("../models/SchoolSubscription");
 const BillingSettings = require("../models/BillingSettings");
@@ -11,7 +10,7 @@ const {
   resolvePendingStudentsAmountInr,
   countPendingActivationStudents,
 } = require("../utils/pendingStudentsEnrollment");
-const { planAmountPaise, stripeIntervalForPlan } = require("../utils/subscriptionPricing");
+const { planAmountPaise } = require("../utils/subscriptionPricing");
 const { getSchoolBillingAccess, trialEndsAtFromSchool } = require("../utils/subscriptionAccess");
 const {
   countRosterActiveStudents,
@@ -19,26 +18,25 @@ const {
 } = require("../utils/studentSeatBilling");
 const { sendMail } = require("../utils/mail");
 const { sendSms } = require("../utils/smsService");
-
-function stripeSecretKey() {
-  const k = process.env.STRIPE_SECRET_KEY;
-  return typeof k === "string" ? k.trim() : "";
-}
-
-function stripeProductId() {
-  const p = process.env.STRIPE_PRODUCT_ID;
-  return typeof p === "string" ? p.trim() : "";
-}
-
-function isStripeConfigured() {
-  return Boolean(stripeSecretKey() && stripeProductId());
-}
-
-function getStripe() {
-  const key = stripeSecretKey();
-  if (!key) return null;
-  return new Stripe(key);
-}
+const {
+  PLAN_KEYS,
+  razorpayKeyId,
+  isRazorpayConfigured,
+  verifyWebhookSignature,
+  verifySubscriptionPaymentSignature,
+  verifyOrderPaymentSignature,
+  loadSubscriptionCatalogPrices,
+  ensureRazorpayCustomer,
+  createSchoolSubscription,
+  fetchSubscription,
+  resolvePlanId,
+  updateSubscriptionQuantity,
+  cancelSubscription,
+  createPendingStudentsOrder,
+  mapRazorpaySubscriptionStatus,
+  periodBoundsFromRazorpaySubscription,
+  envPlanId,
+} = require("../utils/razorpayService");
 
 async function getBillingSettingsDoc() {
   let b = await BillingSettings.findById("global");
@@ -51,7 +49,6 @@ async function getBillingSettingsDoc() {
   return b;
 }
 
-/** Normalize DB/webhook status for API clients. */
 function subscriptionStatusForClient(raw) {
   return raw || "inactive";
 }
@@ -65,35 +62,7 @@ function webAppBase() {
   ).replace(/\/$/, "");
 }
 
-function inferPlanFromRecurring(recurring) {
-  if (!recurring) return "custom";
-  const ic = recurring.interval_count || 1;
-  if (recurring.interval === "month" && ic === 1) return "monthly";
-  if (recurring.interval === "month" && ic === 3) return "quarterly";
-  if (recurring.interval === "year" && ic === 1) return "yearly";
-  return "custom";
-}
-
-function recurringSortKey(recurring) {
-  if (!recurring) return 9999;
-  const ic = recurring.interval_count || 1;
-  if (recurring.interval === "year") return ic * 12;
-  if (recurring.interval === "month") return ic;
-  if (recurring.interval === "week") return ic / 4;
-  return 100 + ic;
-}
-
-function formatRecurringLabel(recurring) {
-  if (!recurring) return "per period";
-  const ic = recurring.interval_count || 1;
-  if (recurring.interval === "month" && ic === 1) return "per month";
-  if (recurring.interval === "month" && ic === 3) return "per quarter";
-  if (recurring.interval === "year" && ic === 1) return "per year";
-  if (ic === 1) return `per ${recurring.interval}`;
-  return `every ${ic} ${recurring.interval}s`;
-}
-
-function schoolHasStripeExportAddress(school) {
+function schoolHasBillingAddress(school) {
   return Boolean(
     school?.name?.trim() &&
       school?.addressLine1?.trim() &&
@@ -102,80 +71,71 @@ function schoolHasStripeExportAddress(school) {
   );
 }
 
-function stripeAddressFromSchool(school) {
-  return {
-    line1: school.addressLine1.trim(),
-    line2: school.addressLine2?.trim() || undefined,
-    city: school.city.trim(),
-    state: school.state?.trim() || undefined,
-    postal_code: school.pincode.trim(),
-    country: "IN",
-  };
+function normalizePlanInput(body) {
+  const planRaw = body?.plan || body?.priceId;
+  if (!planRaw || typeof planRaw !== "string") return null;
+  const trimmed = planRaw.trim();
+  if (PLAN_KEYS.includes(trimmed)) return trimmed;
+  for (const plan of PLAN_KEYS) {
+    if (envPlanId(plan) === trimmed) return plan;
+  }
+  return null;
 }
 
-/**
- * Indian export rules: Stripe needs customer name + address on the Customer and/or Checkout.
- * @see https://stripe.com/docs/india-exports
- */
-async function ensureStripeCustomerForSchoolCheckout(stripe, subDoc, school) {
-  const address = stripeAddressFromSchool(school);
-  const payload = {
-    name: school.name.trim(),
-    address,
-    metadata: { schoolId: school._id.toString(), source: "educa_subscription" },
-  };
-  const em = school.email?.trim();
-  if (em) payload.email = em;
-  if (school.phone?.trim()) payload.phone = school.phone.trim();
+async function applyRazorpaySubscriptionToMongo(subDoc, rzpSub, { paymentId, forceActive } = {}) {
+  if (!subDoc || !rzpSub) return subDoc;
 
-  if (subDoc.stripeCustomerId) {
-    await stripe.customers.update(subDoc.stripeCustomerId, payload);
-    return subDoc.stripeCustomerId;
+  const notes = rzpSub.notes || {};
+  if (notes.plan && PLAN_KEYS.includes(notes.plan)) {
+    subDoc.plan = notes.plan;
+  }
+  if (notes.billedSeatQuantity) {
+    subDoc.billedStudentCount = Number(notes.billedSeatQuantity) || subDoc.billedStudentCount;
+  } else if (rzpSub.quantity != null) {
+    subDoc.billedStudentCount = Number(rzpSub.quantity);
   }
 
-  const customer = await stripe.customers.create(payload);
-  return customer.id;
-}
+  subDoc.razorpaySubscriptionId = rzpSub.id;
+  if (rzpSub.customer_id) subDoc.razorpayCustomerId = rzpSub.customer_id;
+  if (rzpSub.plan_id) subDoc.razorpayPlanId = rzpSub.plan_id;
+  if (paymentId) subDoc.razorpayPaymentId = paymentId;
 
-/**
- * India exports + consistent UX: billing details on Checkout, same payment method options as subscription.
- * @see https://stripe.com/docs/india-exports
- */
-function applyStripeCheckoutBillingAndPayments(sessionConfig) {
-  sessionConfig.billing_address_collection = "required";
-  sessionConfig.customer_update = {
-    address: "auto",
-    name: "auto",
-  };
-
-  const pmcId = process.env.STRIPE_PAYMENT_METHOD_CONFIGURATION_ID?.trim();
-  const pmTypesEnv = process.env.STRIPE_CHECKOUT_PAYMENT_METHOD_TYPES?.trim();
-  const apmOff = process.env.STRIPE_CHECKOUT_AUTOMATIC_PAYMENT_METHODS === "false";
-
-  if (pmcId) {
-    sessionConfig.payment_method_configuration = pmcId;
-  } else if (pmTypesEnv) {
-    const list = pmTypesEnv.split(",").map((s) => s.trim()).filter(Boolean);
-    if (list.length) sessionConfig.payment_method_types = list;
-  } else if (!apmOff) {
-    sessionConfig.automatic_payment_methods = { enabled: true };
-  } else {
-    sessionConfig.payment_method_types = ["card"];
+  const mapped = mapRazorpaySubscriptionStatus(rzpSub.status);
+  if (forceActive || mapped === "active") {
+    subDoc.status = "active";
+    subDoc.graceStartedAt = undefined;
+    subDoc.graceEndsAt = undefined;
+    subDoc.graceReminderDay = undefined;
+    subDoc.remindersSent = { preDue3: false, preDue2: false, preDue1: false };
+    subDoc.lastPaymentAt = new Date();
+  } else if (mapped === "pending") {
+    subDoc.status = "pending";
+  } else if (rzpSub.status === "cancelled" || rzpSub.status === "completed") {
+    subDoc.status = "inactive";
+    subDoc.canceledAt = subDoc.canceledAt || new Date();
+  } else if (mapped === "inactive") {
+    subDoc.status = "inactive";
   }
+
+  const bounds = periodBoundsFromRazorpaySubscription(rzpSub);
+  if (bounds.currentPeriodStart) subDoc.currentPeriodStart = bounds.currentPeriodStart;
+  if (bounds.currentPeriodEnd) subDoc.currentPeriodEnd = bounds.currentPeriodEnd;
+
+  await subDoc.save();
+  return subDoc;
 }
 
 /**
  * POST /api/subscription/checkout — school_admin
- * body: { priceId: string } — recurring price on STRIPE_PRODUCT_ID; quantity is always active students on the roster.
+ * body: { plan: "monthly"|"quarterly"|"yearly" } (priceId accepted as plan id alias)
  */
 exports.createCheckoutSession = async (req, res) => {
   try {
-    const stripe = getStripe();
-    if (!stripe) {
-      return res.status(503).json({ message: "Stripe is not configured (STRIPE_SECRET_KEY)" });
+    if (!isRazorpayConfigured()) {
+      return res.status(503).json({ message: "Razorpay is not configured (RAZORPAY_KEY_ID / RAZORPAY_KEY_SECRET)" });
     }
 
-    const user = await require("../models/User").findById(req.user.id);
+    const user = await User.findById(req.user.id);
     if (!user || user.role !== "school_admin" || !user.schoolId) {
       return res.status(403).json({ message: "Only school administrators can subscribe" });
     }
@@ -185,10 +145,10 @@ exports.createCheckoutSession = async (req, res) => {
       return res.status(403).json({ message: "School must be verified before subscribing" });
     }
 
-    if (!schoolHasStripeExportAddress(school)) {
+    if (!schoolHasBillingAddress(school)) {
       return res.status(400).json({
         message:
-          "Complete your school profile (name, address line 1, city, PIN code) before paying. Stripe requires this for India export compliance.",
+          "Complete your school profile (name, address line 1, city, PIN code) before paying.",
       });
     }
 
@@ -201,35 +161,19 @@ exports.createCheckoutSession = async (req, res) => {
     });
     if (trialAccess.inTrial) {
       return res.status(403).json({
-        message:
-          "Your school is still in the free trial. You can subscribe after the trial ends.",
+        message: "Your school is still in the free trial. You can subscribe after the trial ends.",
         code: "TRIAL_ACTIVE_NO_CHECKOUT",
       });
     }
 
-    const { priceId } = req.body;
-    if (!priceId || typeof priceId !== "string") {
-      return res.status(400).json({ message: "priceId is required (load plans from /api/subscription/catalog)" });
-    }
-
-    const productId = stripeProductId();
-    if (!productId) {
-      return res.status(503).json({
-        message: "Missing STRIPE_PRODUCT_ID — create a Product in Stripe Dashboard and set the id in .env",
+    const plan = normalizePlanInput(req.body);
+    if (!plan) {
+      return res.status(400).json({
+        message: 'plan is required — one of "monthly", "quarterly", "yearly" (from /api/subscription/catalog)',
       });
     }
 
-    const stripePrice = await stripe.prices.retrieve(priceId);
-    if (!stripePrice.active) {
-      return res.status(400).json({ message: "This price is not active" });
-    }
-    if (stripePrice.type !== "recurring") {
-      return res.status(400).json({ message: "Only recurring prices can be used for subscriptions" });
-    }
-    const priceProductId = typeof stripePrice.product === "string" ? stripePrice.product : stripePrice.product?.id;
-    if (priceProductId !== productId) {
-      return res.status(400).json({ message: "Price does not belong to the configured subscription product" });
-    }
+    const returnBase = String(req.body?.returnOrigin || webAppBase()).replace(/\/$/, "");
 
     const billing = await getBillingSettingsDoc();
     const includedSeats = await countIncludedSeatStudents(school._id);
@@ -240,17 +184,10 @@ exports.createCheckoutSession = async (req, res) => {
       });
     }
 
-    const studentCount = includedSeats;
-
-    const unitMinor = stripePrice.unit_amount;
-    if (unitMinor == null || unitMinor < 1) {
-      return res.status(400).json({ message: "Price must have a positive unit amount" });
+    const unitPaise = planAmountPaise(plan, 1, billing.pricePerStudentYearInr);
+    if (unitPaise * includedSeats < 100) {
+      return res.status(400).json({ message: "Total subscription amount too small" });
     }
-    if (unitMinor * studentCount < 50) {
-      return res.status(400).json({ message: "Total subscription amount too small for Stripe" });
-    }
-
-    const plan = inferPlanFromRecurring(stripePrice.recurring);
 
     let subDoc = await SchoolSubscription.findOne({ schoolId: school._id });
     if (!subDoc) {
@@ -258,137 +195,72 @@ exports.createCheckoutSession = async (req, res) => {
         schoolId: school._id,
         plan,
         billingMode: "per_seat",
-        billedStudentCount: studentCount,
+        billedStudentCount: includedSeats,
         pricePerStudentYearInr: billing.pricePerStudentYearInr,
-        status: "inactive",
-        stripePriceId: priceId,
+        status: "pending",
       });
     } else {
       subDoc.plan = plan;
       subDoc.billingMode = "per_seat";
-      subDoc.billedStudentCount = studentCount;
+      subDoc.billedStudentCount = includedSeats;
       subDoc.pricePerStudentYearInr = billing.pricePerStudentYearInr;
-      subDoc.stripePriceId = priceId;
+      subDoc.status = "pending";
     }
 
-    const stripeCustomerId = await ensureStripeCustomerForSchoolCheckout(stripe, subDoc, school);
-    subDoc.stripeCustomerId = stripeCustomerId;
+    const razorpayPlanId = await resolvePlanId(plan, billing.pricePerStudentYearInr);
+    subDoc.razorpayPlanId = razorpayPlanId;
+
+    const customerId = await ensureRazorpayCustomer(subDoc, school);
+    subDoc.razorpayCustomerId = customerId;
     await subDoc.save();
 
-    const sessionConfig = {
-      mode: "subscription",
-      customer: stripeCustomerId,
-      line_items: [{ price: priceId, quantity: studentCount }],
-      success_url: `${webAppBase()}/dashboard/subscription?sub=success&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${webAppBase()}/dashboard/subscription?sub=canceled`,
-      metadata: {
-        schoolId: school._id.toString(),
-        plan,
-        stripePriceId: priceId,
-        mongoSubscriptionId: subDoc._id.toString(),
-        billedSeatQuantity: String(studentCount),
-      },
-      subscription_data: {
-        metadata: {
-          schoolId: school._id.toString(),
-          plan,
-          stripePriceId: priceId,
-          billedSeatQuantity: String(studentCount),
-        },
-      },
-    };
+    const rzpSubscription = await createSchoolSubscription({
+      plan,
+      planId: razorpayPlanId,
+      quantity: includedSeats,
+      customerId,
+      schoolId: school._id,
+      mongoSubscriptionId: subDoc._id,
+    });
 
-    applyStripeCheckoutBillingAndPayments(sessionConfig);
+    subDoc.razorpaySubscriptionId = rzpSubscription.id;
+    await subDoc.save();
 
-    let session;
-    try {
-      session = await stripe.checkout.sessions.create(sessionConfig);
-    } catch (firstErr) {
-      const msg = String(firstErr?.message || "");
-      if (
-        sessionConfig.automatic_payment_methods &&
-        (msg.includes("automatic_payment_methods") || firstErr?.param === "automatic_payment_methods")
-      ) {
-        delete sessionConfig.automatic_payment_methods;
-        session = await stripe.checkout.sessions.create(sessionConfig);
-      } else {
-        throw firstErr;
-      }
-    }
+    const amountPaise = unitPaise * includedSeats;
+
+    const callbackUrl = `${returnBase}/dashboard/subscription?sub=success`;
 
     return res.json({
       data: {
-        url: session.url,
-        sessionId: session.id,
+        keyId: razorpayKeyId(),
+        subscriptionId: rzpSubscription.id,
+        shortUrl: rzpSubscription.short_url || null,
+        plan,
+        quantity: includedSeats,
+        amountPaise,
+        amountInr: amountPaise / 100,
+        currency: "INR",
+        customerId,
+        callbackUrl,
+        successUrl: callbackUrl,
+        cancelUrl: `${returnBase}/dashboard/subscription?sub=canceled`,
       },
     });
   } catch (err) {
     console.error("createCheckoutSession:", err);
-    return res.status(500).json({ message: err.message || "Checkout failed" });
+    const msg =
+      err?.error?.description || err?.error?.reason || err?.message || "Checkout failed";
+    return res.status(500).json({ message: msg });
   }
 };
 
-/**
- * Stripe product + recurring INR prices for STRIPE_PRODUCT_ID.
- * @param {number} includedSeatCount used only for totalForSchoolInr on each row (0 => null).
- */
-async function loadSubscriptionStripeCatalogPrices(includedSeatCount) {
-  if (!isStripeConfigured()) {
-    return {
-      stripeConfigured: false,
-      product: null,
-      prices: [],
-    };
-  }
-
-  const stripe = getStripe();
-  const productId = stripeProductId();
-
-  const [product, pricesList] = await Promise.all([
-    stripe.products.retrieve(productId),
-    stripe.prices.list({ product: productId, active: true, type: "recurring", limit: 100 }),
-  ]);
-
-  const prices = pricesList.data
-    .filter((p) => p.currency === "inr" && p.unit_amount != null && p.unit_amount >= 1)
-    .sort((a, b) => recurringSortKey(a.recurring) - recurringSortKey(b.recurring))
-    .map((p) => {
-      const unitMinor = p.unit_amount || 0;
-      return {
-        id: p.id,
-        nickname: p.nickname || null,
-        currency: p.currency,
-        unitAmountMinor: unitMinor,
-        unitAmountInr: unitMinor / 100,
-        interval: p.recurring?.interval,
-        intervalCount: p.recurring?.interval_count || 1,
-        intervalLabel: formatRecurringLabel(p.recurring),
-        plan: inferPlanFromRecurring(p.recurring),
-        totalForSchoolInr:
-          includedSeatCount >= 1 ? (unitMinor * includedSeatCount) / 100 : null,
-      };
-    });
-
-  return {
-    stripeConfigured: true,
-    product: {
-      id: product.id,
-      name: product.name,
-      description: product.description || null,
-    },
-    prices,
-  };
-}
-
-/**
- * GET /api/subscription/public-catalog — same prices as dashboard catalog, no auth (marketing site).
- */
 exports.getPublicSubscriptionCatalog = async (req, res) => {
   try {
-    const base = await loadSubscriptionStripeCatalogPrices(0);
+    const billing = await getBillingSettingsDoc();
+    const base = await loadSubscriptionCatalogPrices(0, billing.pricePerStudentYearInr);
     return res.json({
       data: {
-        stripeConfigured: base.stripeConfigured,
+        razorpayConfigured: base.razorpayConfigured,
         product: base.product,
         prices: base.prices,
       },
@@ -399,24 +271,21 @@ exports.getPublicSubscriptionCatalog = async (req, res) => {
   }
 };
 
-/**
- * GET /api/subscription/catalog — Stripe product + recurring INR prices (school_admin)
- */
 exports.getSubscriptionCatalog = async (req, res) => {
   try {
-    const user = await require("../models/User").findById(req.user.id);
+    const user = await User.findById(req.user.id);
     if (!user || user.role !== "school_admin" || !user.schoolId) {
       return res.status(403).json({ message: "Forbidden" });
     }
 
+    const billing = await getBillingSettingsDoc();
     const rosterCount = await countRosterActiveStudents(user.schoolId);
     const includedSeatCount = await countIncludedSeatStudents(user.schoolId);
-
-    const base = await loadSubscriptionStripeCatalogPrices(includedSeatCount);
+    const base = await loadSubscriptionCatalogPrices(includedSeatCount, billing.pricePerStudentYearInr);
 
     return res.json({
       data: {
-        stripeConfigured: base.stripeConfigured,
+        razorpayConfigured: base.razorpayConfigured,
         product: base.product,
         prices: base.prices,
         activeStudentCount: rosterCount,
@@ -429,12 +298,9 @@ exports.getSubscriptionCatalog = async (req, res) => {
   }
 };
 
-/**
- * GET /api/subscription/status — school_admin
- */
 exports.getSubscriptionStatus = async (req, res) => {
   try {
-    const user = await require("../models/User").findById(req.user.id);
+    const user = await User.findById(req.user.id);
     if (!user || user.role !== "school_admin" || !user.schoolId) {
       return res.status(403).json({ message: "Forbidden" });
     }
@@ -452,19 +318,11 @@ exports.getSubscriptionStatus = async (req, res) => {
 
     const plan = sub?.plan || null;
     const statusOut = sub?.status ?? null;
-    const currentPeriodStart = sub?.currentPeriodStart;
-    const currentPeriodEnd = sub?.currentPeriodEnd;
-    const graceEndsAt = sub?.graceEndsAt;
-    const lastPaymentAt = sub?.lastPaymentAt;
-    const billingMode = sub?.billingMode || null;
-
     const amountPaise =
       plan && ["monthly", "quarterly", "yearly"].includes(plan)
         ? planAmountPaise(plan, includedSeatCount, billing.pricePerStudentYearInr)
         : null;
 
-    // Quote all cadences whenever we have a student count so checkout cards can show prices
-    // before the school has chosen a plan (plan null / status none).
     const amountsInr =
       includedSeatCount >= 1
         ? {
@@ -486,13 +344,14 @@ exports.getSubscriptionStatus = async (req, res) => {
         amountsInr,
         currentPeriodAmountInr: amountPaise != null ? amountPaise / 100 : null,
         status: statusOut,
-        currentPeriodStart,
-        currentPeriodEnd,
-        graceEndsAt,
+        currentPeriodStart: sub?.currentPeriodStart,
+        currentPeriodEnd: sub?.currentPeriodEnd,
+        graceEndsAt: sub?.graceEndsAt,
         adminUnblockUntil: sub?.adminUnblockUntil,
-        lastPaymentAt,
-        billingMode,
-        stripeConfigured: isStripeConfigured(),
+        lastPaymentAt: sub?.lastPaymentAt,
+        billingMode: sub?.billingMode || null,
+        razorpayConfigured: isRazorpayConfigured(),
+        razorpaySubscriptionId: sub?.razorpaySubscriptionId || null,
         trialEndsAt: trialAccess.trialEndsAt,
         inTrial: trialAccess.inTrial,
         needsSubscription: trialAccess.needsSubscription,
@@ -506,124 +365,268 @@ exports.getSubscriptionStatus = async (req, res) => {
   }
 };
 
-/**
- * POST /api/subscription/sync-student-count — school_admin (updates Stripe subscription item price)
- */
-exports.syncStudentCountToStripe = async (req, res) => {
+exports.syncStudentCount = async (req, res) => {
   try {
-    const stripe = getStripe();
-    if (!stripe) {
-      return res.status(503).json({ message: "Stripe not configured" });
+    if (!isRazorpayConfigured()) {
+      return res.status(503).json({ message: "Razorpay not configured" });
     }
 
-    const user = await require("../models/User").findById(req.user.id);
+    const user = await User.findById(req.user.id);
     if (!user || user.role !== "school_admin" || !user.schoolId) {
       return res.status(403).json({ message: "Forbidden" });
     }
 
     const sub = await SchoolSubscription.findOne({ schoolId: user.schoolId });
-    if (!sub?.stripeSubscriptionId) {
-      return res.status(400).json({ message: "No active Stripe subscription to update" });
+    if (!sub?.razorpaySubscriptionId) {
+      return res.status(400).json({ message: "No active Razorpay subscription to update" });
     }
 
     const billing = await getBillingSettingsDoc();
     const includedSeatCount = await countIncludedSeatStudents(user.schoolId);
 
-    const stripeSub = await stripe.subscriptions.retrieve(sub.stripeSubscriptionId, {
-      expand: ["items.data.price"],
-    });
-    const item = stripeSub.items.data[0];
-    const itemId = item?.id;
-    if (!itemId) {
-      return res.status(500).json({ message: "Could not read subscription items" });
-    }
-
     if (sub.billingMode === "per_seat") {
-      await stripe.subscriptions.update(sub.stripeSubscriptionId, {
-        items: [{ id: itemId, quantity: includedSeatCount }],
-        proration_behavior: "create_prorations",
-      });
-
+      await updateSubscriptionQuantity(sub.razorpaySubscriptionId, includedSeatCount);
       sub.billedStudentCount = includedSeatCount;
       sub.pricePerStudentYearInr = billing.pricePerStudentYearInr;
       await sub.save();
 
       return res.json({
-        message: "Subscription seat count updated in Stripe (prorations may apply)",
+        message: "Subscription seat count updated in Razorpay",
         data: { activeStudentCount: includedSeatCount, billingMode: "per_seat" },
       });
     }
 
-    const plan = sub.plan;
-    if (!plan || !["monthly", "quarterly", "yearly"].includes(plan)) {
-      return res.status(400).json({ message: "Plan unknown — cannot sync legacy subscription" });
-    }
-
-    const amountPaise = planAmountPaise(plan, includedSeatCount, billing.pricePerStudentYearInr);
-    const productId = stripeProductId();
-    const recurring = stripeIntervalForPlan(plan);
-
-    const newPrice = await stripe.prices.create({
-      currency: "inr",
-      unit_amount: amountPaise,
-      recurring,
-      product: productId,
-      metadata: { schoolId: user.schoolId.toString(), plan, reason: "count_sync" },
-    });
-
-    await stripe.subscriptions.update(sub.stripeSubscriptionId, {
-      items: [{ id: itemId, price: newPrice.id }],
-      proration_behavior: "create_prorations",
-    });
-
-    sub.billedStudentCount = includedSeatCount;
-    sub.pricePerStudentYearInr = billing.pricePerStudentYearInr;
-    sub.stripePriceId = newPrice.id;
-    await sub.save();
-
-    return res.json({
-      message: "Subscription updated for new student count (prorations may apply)",
-      data: { activeStudentCount: includedSeatCount, amountPaise, billingMode: "dynamic_total" },
-    });
+    return res.status(400).json({ message: "Only per-seat subscriptions can be synced" });
   } catch (err) {
-    console.error("syncStudentCountToStripe:", err);
+    console.error("syncStudentCount:", err);
     return res.status(500).json({ message: err.message || "Sync failed" });
   }
 };
 
-async function handleInvoicePaid(stripe, invoice, fallbackSchoolId) {
-  const subId = invoice.subscription;
-  if (!subId) return;
+/**
+ * POST /api/subscription/verify-payment — school_admin
+ * body: { razorpay_payment_id, razorpay_subscription_id, razorpay_signature }
+ */
+exports.verifyPayment = async (req, res) => {
+  try {
+    if (!isRazorpayConfigured()) {
+      return res.status(503).json({ message: "Razorpay is not configured" });
+    }
 
-  const stripeSub = await stripe.subscriptions.retrieve(subId);
-  const schoolId = stripeSub.metadata?.schoolId || fallbackSchoolId;
+    const user = await User.findById(req.user.id);
+    if (!user || user.role !== "school_admin" || !user.schoolId) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+
+    const schoolForTrial = await School.findById(user.schoolId)
+      .select("verificationStatus verifiedAt createdAt")
+      .lean();
+    const trialAccess = await getSchoolBillingAccess(user.schoolId, { school: schoolForTrial });
+    if (trialAccess.inTrial) {
+      return res.status(403).json({
+        message: "Your school is still in the free trial.",
+        code: "TRIAL_ACTIVE_NO_CHECKOUT",
+      });
+    }
+
+    const {
+      razorpay_payment_id,
+      razorpay_subscription_id,
+      razorpay_signature,
+    } = req.body || {};
+
+    if (!razorpay_payment_id || !razorpay_subscription_id || !razorpay_signature) {
+      return res.status(400).json({ message: "razorpay_payment_id, razorpay_subscription_id, razorpay_signature are required" });
+    }
+
+    if (
+      !verifySubscriptionPaymentSignature({
+        razorpay_payment_id,
+        razorpay_subscription_id,
+        razorpay_signature,
+      })
+    ) {
+      return res.status(400).json({ message: "Invalid payment signature" });
+    }
+
+    const rzpSub = await fetchSubscription(razorpay_subscription_id);
+    if (!rzpSub) {
+      return res.status(404).json({ message: "Subscription not found in Razorpay" });
+    }
+
+    const notesSchoolId = rzpSub.notes?.schoolId ? String(rzpSub.notes.schoolId) : null;
+    if (!notesSchoolId || notesSchoolId !== String(user.schoolId)) {
+      return res.status(403).json({ message: "This subscription does not belong to your school" });
+    }
+
+    const subDoc = await SchoolSubscription.findOne({ schoolId: user.schoolId });
+    if (!subDoc) {
+      return res.status(404).json({ message: "School subscription record not found" });
+    }
+
+    await applyRazorpaySubscriptionToMongo(subDoc, rzpSub, {
+      paymentId: razorpay_payment_id,
+      forceActive: true,
+    });
+
+    const refreshed = await SchoolSubscription.findOne({ schoolId: user.schoolId }).lean();
+    return res.json({
+      message: "Payment verified",
+      data: {
+        status: subscriptionStatusForClient(refreshed?.status),
+        razorpaySubscriptionId: refreshed?.razorpaySubscriptionId,
+        currentPeriodEnd: refreshed?.currentPeriodEnd,
+      },
+    });
+  } catch (err) {
+    console.error("verifyPayment:", err);
+    return res.status(500).json({ message: err.message || "Could not verify payment" });
+  }
+};
+
+/** Alias for confirm-session route (same as verify-payment). */
+exports.confirmCheckoutSession = exports.verifyPayment;
+
+/**
+ * POST /api/subscription/sync-from-razorpay — school_admin
+ * After redirect when Razorpay omits payment query params; pulls live status from Razorpay API.
+ */
+exports.syncSubscriptionFromRazorpay = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user || user.role !== "school_admin" || !user.schoolId) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+
+    const subDoc = await SchoolSubscription.findOne({ schoolId: user.schoolId });
+    if (!subDoc?.razorpaySubscriptionId) {
+      return res.status(400).json({ message: "No Razorpay subscription to sync" });
+    }
+
+    const rzpSub = await fetchSubscription(subDoc.razorpaySubscriptionId);
+    if (!rzpSub) {
+      return res.status(404).json({ message: "Subscription not found in Razorpay" });
+    }
+
+    const notesSchoolId = rzpSub.notes?.schoolId ? String(rzpSub.notes.schoolId) : null;
+    if (notesSchoolId && notesSchoolId !== String(user.schoolId)) {
+      return res.status(403).json({ message: "This subscription does not belong to your school" });
+    }
+
+    const isPaid =
+      rzpSub.status === "active" ||
+      rzpSub.status === "authenticated" ||
+      Number(rzpSub.paid_count) > 0;
+
+    await applyRazorpaySubscriptionToMongo(subDoc, rzpSub, {
+      forceActive: isPaid,
+    });
+
+    const refreshed = await SchoolSubscription.findOne({ schoolId: user.schoolId }).lean();
+    return res.json({
+      message: "Synced from Razorpay",
+      data: {
+        status: subscriptionStatusForClient(refreshed?.status),
+        razorpayStatus: rzpSub.status,
+        currentPeriodEnd: refreshed?.currentPeriodEnd,
+      },
+    });
+  } catch (err) {
+    console.error("syncSubscriptionFromRazorpay:", err);
+    return res.status(500).json({ message: err.message || "Could not sync subscription" });
+  }
+};
+
+/**
+ * POST /api/subscription/cancel — school_admin
+ * body: { cancelAtCycleEnd?: boolean }
+ */
+exports.cancelSchoolSubscription = async (req, res) => {
+  try {
+    if (!isRazorpayConfigured()) {
+      return res.status(503).json({ message: "Razorpay not configured" });
+    }
+
+    const user = await User.findById(req.user.id);
+    if (!user || user.role !== "school_admin" || !user.schoolId) {
+      return res.status(403).json({ message: "Forbidden" });
+    }
+
+    const sub = await SchoolSubscription.findOne({ schoolId: user.schoolId });
+    if (!sub?.razorpaySubscriptionId) {
+      return res.status(400).json({ message: "No Razorpay subscription to cancel" });
+    }
+
+    const cancelAtCycleEnd = Boolean(req.body?.cancelAtCycleEnd);
+    await cancelSubscription(sub.razorpaySubscriptionId, cancelAtCycleEnd);
+
+    if (!cancelAtCycleEnd) {
+      sub.status = "inactive";
+      sub.canceledAt = new Date();
+      await sub.save();
+    }
+
+    return res.json({
+      message: cancelAtCycleEnd
+        ? "Subscription will cancel at the end of the current billing period"
+        : "Subscription cancelled",
+    });
+  } catch (err) {
+    console.error("cancelSchoolSubscription:", err);
+    return res.status(500).json({ message: err.message || "Cancel failed" });
+  }
+};
+
+async function handleSubscriptionCharged(payload) {
+  const rzpSub = payload.subscription?.entity || payload.subscription;
+  const payment = payload.payment?.entity || payload.payment;
+  if (!rzpSub?.id) return;
+
+  const schoolId = rzpSub.notes?.schoolId;
   if (!schoolId) return;
 
   const subDoc = await SchoolSubscription.findOne({ schoolId });
   if (!subDoc) return;
 
-  // Paid invoice => paid subscription in good standing.
-  subDoc.status = "active";
-  subDoc.stripeSubscriptionId = stripeSub.id;
-  const cust = stripeSub.customer;
-  subDoc.stripeCustomerId = typeof cust === "string" ? cust : cust?.id;
-  subDoc.currentPeriodStart = new Date(stripeSub.current_period_start * 1000);
-  subDoc.currentPeriodEnd = new Date(stripeSub.current_period_end * 1000);
-  subDoc.lastPaymentAt = new Date();
-  subDoc.graceStartedAt = undefined;
-  subDoc.graceEndsAt = undefined;
-  subDoc.graceReminderDay = undefined;
-  subDoc.remindersSent = { preDue3: false, preDue2: false, preDue1: false };
-  await subDoc.save();
-
+  await applyRazorpaySubscriptionToMongo(subDoc, rzpSub, {
+    paymentId: payment?.id,
+    forceActive: true,
+  });
 }
 
-async function handleInvoicePaymentFailed(stripe, invoice) {
-  const subId = invoice.subscription;
-  if (!subId) return;
+async function handleSubscriptionActivated(payload) {
+  const rzpSub = payload.subscription?.entity || payload.subscription;
+  if (!rzpSub?.id) return;
+  const schoolId = rzpSub.notes?.schoolId;
+  if (!schoolId) return;
 
-  const stripeSub = await stripe.subscriptions.retrieve(subId);
-  const schoolId = stripeSub.metadata?.schoolId;
+  const subDoc = await SchoolSubscription.findOne({ schoolId });
+  if (!subDoc) return;
+
+  await applyRazorpaySubscriptionToMongo(subDoc, rzpSub, { forceActive: true });
+}
+
+async function handleSubscriptionCancelled(payload) {
+  const rzpSub = payload.subscription?.entity || payload.subscription;
+  if (!rzpSub?.id) return;
+  const schoolId = rzpSub.notes?.schoolId;
+  if (!schoolId) return;
+
+  const subDoc = await SchoolSubscription.findOne({ schoolId });
+  if (!subDoc) return;
+
+  subDoc.status = "inactive";
+  subDoc.canceledAt = new Date();
+  const bounds = periodBoundsFromRazorpaySubscription(rzpSub);
+  if (bounds.currentPeriodEnd) subDoc.currentPeriodEnd = bounds.currentPeriodEnd;
+  await subDoc.save();
+}
+
+async function handlePaymentFailed(payload) {
+  const payment = payload.payment?.entity || payload.payment;
+  const rzpSub = payload.subscription?.entity || payload.subscription;
+  const schoolId =
+    rzpSub?.notes?.schoolId || payment?.notes?.schoolId || payment?.notes?.school_id;
   if (!schoolId) return;
 
   const subDoc = await SchoolSubscription.findOne({ schoolId });
@@ -640,157 +643,22 @@ async function handleInvoicePaymentFailed(stripe, invoice) {
     await sendMail({
       to: school.email,
       subject: "Payment failed — subscription access paused",
-      text: `Your Utthan subscription payment did not go through. Staff and parent access is paused until payment succeeds. The school admin can update the payment method or complete payment from the school billing dashboard.`,
+      text: `Your Utthan subscription payment did not go through. Staff and parent access is paused until payment succeeds. The school admin can complete payment from the school billing dashboard.`,
       logContext: "subscription_payment_failed",
     });
   }
 }
 
-async function handleSubscriptionUpdated(stripeSub, fallbackSchoolId) {
-  const schoolId = stripeSub.metadata?.schoolId || fallbackSchoolId;
-  if (!schoolId) return;
+async function handlePendingStudentsPaymentCaptured(payment) {
+  const notes = payment.notes || {};
+  if (notes.type !== "pending_students") return;
+  if (payment.status !== "captured") return;
 
-  const subDoc = await SchoolSubscription.findOne({ schoolId });
-  if (!subDoc) return;
-
-  if (stripeSub.status === "active" || stripeSub.status === "trialing") {
-    subDoc.status = "active";
-    subDoc.currentPeriodStart = new Date(stripeSub.current_period_start * 1000);
-    subDoc.currentPeriodEnd = new Date(stripeSub.current_period_end * 1000);
-    subDoc.graceEndsAt = undefined;
-    subDoc.graceStartedAt = undefined;
-    subDoc.graceReminderDay = undefined;
-  } else if (stripeSub.status === "past_due") {
-    subDoc.status = "inactive";
-    subDoc.graceStartedAt = undefined;
-    subDoc.graceEndsAt = undefined;
-    subDoc.graceReminderDay = undefined;
-  } else if (stripeSub.status === "unpaid") {
-    subDoc.status = "inactive";
-    subDoc.graceStartedAt = undefined;
-    subDoc.graceEndsAt = undefined;
-    subDoc.graceReminderDay = undefined;
-  } else if (stripeSub.status === "canceled") {
-    subDoc.status = "inactive";
-    subDoc.canceledAt = new Date();
-  }
-
-  subDoc.stripeSubscriptionId = stripeSub.id;
-  const cust2 = stripeSub.customer;
-  subDoc.stripeCustomerId = typeof cust2 === "string" ? cust2 : cust2?.id;
-
-  const itemQty = stripeSub.items?.data?.[0]?.quantity;
-  if (itemQty != null && subDoc.billingMode === "per_seat") {
-    subDoc.billedStudentCount = itemQty;
-  }
-
-  await subDoc.save();
-}
-
-/**
- * POST /api/subscription/confirm-session — school_admin
- * Pulls Checkout + Subscription from Stripe and updates MongoDB. Use when returning from Checkout success
- * (especially local dev: Stripe cannot POST webhooks to localhost unless you use Stripe CLI forwarding).
- * body: { sessionId } from success URL ?session_id=cs_...
- */
-exports.confirmCheckoutSession = async (req, res) => {
-  try {
-    const stripe = getStripe();
-    if (!stripe) {
-      return res.status(503).json({ message: "Stripe is not configured" });
-    }
-
-    const user = await require("../models/User").findById(req.user.id);
-    if (!user || user.role !== "school_admin" || !user.schoolId) {
-      return res.status(403).json({ message: "Forbidden" });
-    }
-
-    const schoolForTrial = await School.findById(user.schoolId)
-      .select("verificationStatus verifiedAt createdAt")
-      .lean();
-    const trialAccess = await getSchoolBillingAccess(user.schoolId, { school: schoolForTrial });
-    if (trialAccess.inTrial) {
-      return res.status(403).json({
-        message:
-          "Your school is still in the free trial. Subscription checkout is not available until the trial ends.",
-        code: "TRIAL_ACTIVE_NO_CHECKOUT",
-      });
-    }
-
-    const { sessionId } = req.body || {};
-    if (!sessionId || typeof sessionId !== "string") {
-      return res.status(400).json({ message: "sessionId is required" });
-    }
-
-    const session = await stripe.checkout.sessions.retrieve(sessionId, {
-      expand: ["subscription", "subscription.latest_invoice"],
-    });
-
-    if (session.mode !== "subscription") {
-      return res.status(400).json({ message: "Not a subscription checkout" });
-    }
-
-    const subRef = session.subscription;
-    if (!subRef) {
-      return res.status(400).json({ message: "Subscription not available on this session yet" });
-    }
-
-    const stripeSub =
-      typeof subRef === "string"
-        ? await stripe.subscriptions.retrieve(subRef, { expand: ["latest_invoice"] })
-        : subRef;
-
-    const userSchoolId = String(user.schoolId);
-    const sessionSchoolId = session.metadata?.schoolId ? String(session.metadata.schoolId) : null;
-    const subSchoolId = stripeSub.metadata?.schoolId ? String(stripeSub.metadata.schoolId) : null;
-    const resolvedSchoolId = sessionSchoolId || subSchoolId;
-    if (!resolvedSchoolId || resolvedSchoolId !== userSchoolId) {
-      return res.status(403).json({ message: "This checkout session does not belong to your school" });
-    }
-
-    if (session.payment_status === "paid") {
-      const li = stripeSub.latest_invoice;
-      if (li) {
-        const inv = typeof li === "string" ? await stripe.invoices.retrieve(li) : li;
-        if (inv?.status === "paid" && inv.subscription) {
-          await handleInvoicePaid(stripe, inv, resolvedSchoolId);
-        }
-      }
-    }
-
-    await handleSubscriptionUpdated(stripeSub, resolvedSchoolId);
-
-    const refreshed = await SchoolSubscription.findOne({ schoolId: user.schoolId }).lean();
-    return res.json({
-      message: "Synced from Stripe",
-      data: {
-        status: subscriptionStatusForClient(refreshed?.status),
-        stripeSubscriptionId: refreshed?.stripeSubscriptionId,
-        currentPeriodEnd: refreshed?.currentPeriodEnd,
-      },
-    });
-  } catch (err) {
-    console.error("confirmCheckoutSession:", err);
-    return res.status(500).json({ message: err.message || "Could not confirm checkout session" });
-  }
-};
-
-/**
- * One-time Checkout for pending student activations (mode=payment).
- * Idempotent: duplicate webhooks get modifiedCount 0 on Student.updateMany.
- * Aligns billedStudentCount and (for per_seat) Stripe subscription quantity without extra proration
- * (the Checkout payment already covered the prorated amount).
- */
-async function handlePendingStudentsCheckoutCompleted(session) {
-  const meta = session.metadata || {};
-  if (meta.type !== "pending_students") return;
-  const schoolIdRaw = meta.school_id || meta.schoolId;
+  const schoolIdRaw = notes.school_id || notes.schoolId;
   if (!schoolIdRaw) return;
-  if (session.payment_status !== "paid") return;
 
   const schoolId = new mongoose.Types.ObjectId(String(schoolIdRaw));
 
-  // Fetch pending students before activation so we can read their stored credentials.
   const pendingStudents = await Student.find(
     { schoolId, status: "pending" },
     { _id: 1, name: 1, "pendingCredentialsSms.phone": 1, "pendingCredentialsSms.message": 1 }
@@ -806,7 +674,6 @@ async function handlePendingStudentsCheckoutCompleted(session) {
 
   if (result.modifiedCount === 0) return;
 
-  // Send deferred SMS credentials to each newly activated student's parent.
   for (const s of pendingStudents) {
     const phone = s.pendingCredentialsSms?.phone;
     const message = s.pendingCredentialsSms?.message;
@@ -817,35 +684,88 @@ async function handlePendingStudentsCheckoutCompleted(session) {
     }
   }
 
-  const schoolIdStr = String(schoolIdRaw);
-  const includedSeatCount = await countIncludedSeatStudents(schoolIdStr);
-
+  const includedSeatCount = await countIncludedSeatStudents(schoolIdRaw);
   await SchoolSubscription.updateOne(
-    { schoolId: schoolIdStr },
+    { schoolId: schoolIdRaw },
     { $set: { billedStudentCount: includedSeatCount } }
   );
 
-  const stripe = getStripe();
-  const subDoc = await SchoolSubscription.findOne({ schoolId: schoolIdStr });
-  if (stripe && subDoc?.stripeSubscriptionId && subDoc.billingMode === "per_seat") {
+  const subDoc = await SchoolSubscription.findOne({ schoolId: schoolIdRaw });
+  if (subDoc?.razorpaySubscriptionId && subDoc.billingMode === "per_seat") {
     try {
-      const stripeSub = await stripe.subscriptions.retrieve(subDoc.stripeSubscriptionId);
-      const itemId = stripeSub.items.data[0]?.id;
-      if (itemId) {
-        await stripe.subscriptions.update(subDoc.stripeSubscriptionId, {
-          items: [{ id: itemId, quantity: includedSeatCount }],
-          proration_behavior: "none",
-        });
-      }
+      await updateSubscriptionQuantity(subDoc.razorpaySubscriptionId, includedSeatCount);
     } catch (e) {
-      console.error("pending_students Stripe quantity sync:", e);
+      console.error("pending_students Razorpay quantity sync:", e);
     }
   }
 }
 
-/**
- * GET /api/subscription/pending-students-activation-quote
- */
+exports.handleRazorpayWebhook = async (req, res) => {
+  const whSecret = require("../utils/razorpayService").webhookSecret();
+  if (!isRazorpayConfigured() || !whSecret) {
+    return res.status(503).send("Razorpay webhook not configured");
+  }
+
+  const signature = req.headers["x-razorpay-signature"];
+  if (!verifyWebhookSignature(req.body, signature)) {
+    return res.status(400).send("Invalid webhook signature");
+  }
+
+  let event;
+  try {
+    const raw = Buffer.isBuffer(req.body) ? req.body.toString("utf8") : String(req.body);
+    event = JSON.parse(raw);
+  } catch (err) {
+    return res.status(400).send(`Webhook parse error: ${err.message}`);
+  }
+
+  try {
+    const eventType = event.event;
+    const payload = event.payload || {};
+
+    switch (eventType) {
+      case "subscription.charged":
+        await handleSubscriptionCharged(payload);
+        break;
+      case "subscription.activated":
+        await handleSubscriptionActivated(payload);
+        break;
+      case "subscription.cancelled":
+      case "subscription.completed":
+        await handleSubscriptionCancelled(payload);
+        break;
+      case "subscription.halted":
+      case "subscription.pending": {
+        const rzpSub = payload.subscription?.entity;
+        if (rzpSub?.notes?.schoolId) {
+          const subDoc = await SchoolSubscription.findOne({ schoolId: rzpSub.notes.schoolId });
+          if (subDoc) {
+            await applyRazorpaySubscriptionToMongo(subDoc, rzpSub, {
+              forceActive: eventType === "subscription.pending",
+            });
+          }
+        }
+        break;
+      }
+      case "payment.failed":
+        await handlePaymentFailed(payload);
+        break;
+      case "payment.captured": {
+        const payment = payload.payment?.entity;
+        if (payment) await handlePendingStudentsPaymentCaptured(payment);
+        break;
+      }
+      default:
+        break;
+    }
+  } catch (e) {
+    console.error("Webhook handler error:", e);
+    return res.status(500).json({ received: false });
+  }
+
+  return res.json({ received: true });
+};
+
 exports.getPendingStudentsActivationQuote = async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
@@ -893,15 +813,12 @@ exports.getPendingStudentsActivationQuote = async (req, res) => {
 };
 
 /**
- * POST /api/schools/:id/create-pending-checkout
- * India Stripe + INR: non-Indian test cards (e.g. 4242…) are treated as international and fail without export
- * onboarding; use test Visa 4000003560000008. @see https://docs.stripe.com/testing#international-cards
+ * POST /api/schools/:id/create-pending-checkout — one-time Razorpay order for pending students.
  */
 exports.createPendingStudentsCheckout = async (req, res) => {
   try {
-    const stripe = getStripe();
-    if (!stripe) {
-      return res.status(503).json({ message: "Stripe is not configured (STRIPE_SECRET_KEY)" });
+    if (!isRazorpayConfigured()) {
+      return res.status(503).json({ message: "Razorpay is not configured" });
     }
 
     const user = await User.findById(req.user.id);
@@ -914,16 +831,17 @@ exports.createPendingStudentsCheckout = async (req, res) => {
       return res.status(403).json({ message: "You can only checkout for your own school" });
     }
 
+    const returnBase = String(req.body?.returnOrigin || webAppBase()).replace(/\/$/, "");
+
     const schoolId = user.schoolId;
     const school = await School.findById(schoolId);
     if (!school || school.verificationStatus !== "Verified") {
       return res.status(403).json({ message: "School must be verified before paying" });
     }
 
-    if (!schoolHasStripeExportAddress(school)) {
+    if (!schoolHasBillingAddress(school)) {
       return res.status(400).json({
-        message:
-          "Complete your school profile (name, address line 1, city, PIN code) before paying. Stripe requires this for India export compliance.",
+        message: "Complete your school profile (name, address line 1, city, PIN code) before paying.",
       });
     }
 
@@ -961,149 +879,95 @@ exports.createPendingStudentsCheckout = async (req, res) => {
       subDoc,
       pricePerYear
     );
-    let amountInr = Math.max(1, resolvedInr);
-    const unitAmountPaise = Math.max(50, Math.round(amountInr * 100));
+    const amountInr = Math.max(1, resolvedInr);
+    const unitAmountPaise = Math.max(100, Math.round(amountInr * 100));
 
-    const productId = stripeProductId();
-    if (!productId) {
-      return res.status(503).json({
-        message: "Missing STRIPE_PRODUCT_ID — use the same Product as subscription checkout",
-      });
-    }
-
-    const customerId = await ensureStripeCustomerForSchoolCheckout(stripe, subDoc, school);
-
-    const base = webAppBase();
-    const sessionConfig = {
-      mode: "payment",
-      customer: customerId,
-      // Same catalog Product as subscription (recurring prices) so Checkout settles as domestic INR like /subscription.
-      locale: "en",
-      line_items: [
-        {
-          price_data: {
-            currency: "inr",
-            product: productId,
-            unit_amount: unitAmountPaise,
-          },
-          quantity: 1,
-        },
-      ],
-      metadata: {
-        type: "pending_students",
-        school_id: school._id.toString(),
-        schoolId: school._id.toString(),
-      },
-      // Statement / PI description (also used for India export reporting when the payer is non-IN).
-      payment_intent_data: {
-        description: `Student seat activation, prorated (${pendingCount} seat(s)) — ${school.name}`,
-        metadata: {
-          type: "pending_students",
-          school_id: school._id.toString(),
-          schoolId: school._id.toString(),
-        },
-      },
-      success_url: `${base}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${base}/payment-cancel`,
-    };
-
-    applyStripeCheckoutBillingAndPayments(sessionConfig);
-
-    let session;
-    try {
-      session = await stripe.checkout.sessions.create(sessionConfig);
-    } catch (firstErr) {
-      const msg = String(firstErr?.message || "");
-      if (
-        sessionConfig.automatic_payment_methods &&
-        (msg.includes("automatic_payment_methods") || firstErr?.param === "automatic_payment_methods")
-      ) {
-        delete sessionConfig.automatic_payment_methods;
-        session = await stripe.checkout.sessions.create(sessionConfig);
-      } else {
-        throw firstErr;
-      }
-    }
-
-    if (!subDoc.stripeCustomerId) {
-      subDoc.stripeCustomerId = customerId;
+    const customerId = await ensureRazorpayCustomer(subDoc, school);
+    if (!subDoc.razorpayCustomerId) {
+      subDoc.razorpayCustomerId = customerId;
       await subDoc.save();
     }
 
-    return res.json({ url: session.url });
+    const order = await createPendingStudentsOrder({
+      amountPaise: unitAmountPaise,
+      schoolId: school._id,
+      pendingCount,
+    });
+
+    const callbackUrl = `${returnBase}/dashboard/students?payment=success`;
+
+    return res.json({
+      data: {
+        keyId: razorpayKeyId(),
+        orderId: order.id,
+        amountPaise: order.amount,
+        amountInr: order.amount / 100,
+        currency: order.currency,
+        customerId,
+        description: `Student seat activation, prorated (${pendingCount} seat(s)) — ${school.name}`,
+        callbackUrl,
+        successUrl: callbackUrl,
+        cancelUrl: `${returnBase}/dashboard/students?payment=cancel`,
+      },
+    });
   } catch (err) {
     console.error("createPendingStudentsCheckout:", err);
-    return res.status(500).json({ message: err.message || "Could not create checkout session" });
+    return res.status(500).json({ message: err.message || "Could not create checkout" });
   }
 };
 
 /**
- * Raw body webhook — mounted separately in server.js
+ * POST /api/subscription/verify-pending-payment — after Razorpay order checkout for pending students.
  */
-exports.handleStripeWebhook = async (req, res) => {
-  const stripe = getStripe();
-  const whSecret = process.env.STRIPE_WEBHOOK_SECRET;
-  if (!stripe || !whSecret) {
-    return res.status(503).send("Stripe webhook not configured");
-  }
-
-  const sig = req.headers["stripe-signature"];
-  let event;
+exports.verifyPendingStudentsPayment = async (req, res) => {
   try {
-    event = stripe.webhooks.constructEvent(req.body, sig, whSecret);
-  } catch (err) {
-    console.error("Webhook signature:", err.message);
-    return res.status(400).send(`Webhook Error: ${err.message}`);
-  }
-
-  try {
-    switch (event.type) {
-      case "invoice.paid":
-        await handleInvoicePaid(stripe, event.data.object, null);
-        break;
-      case "invoice.payment_failed":
-        await handleInvoicePaymentFailed(stripe, event.data.object);
-        break;
-      case "customer.subscription.updated":
-      case "customer.subscription.deleted":
-        await handleSubscriptionUpdated(event.data.object, null);
-        break;
-      case "checkout.session.completed": {
-        const session = event.data.object;
-        if (session.mode === "payment" && session.metadata?.type === "pending_students") {
-          await handlePendingStudentsCheckoutCompleted(session);
-          break;
-        }
-        if (session.mode === "subscription" && session.subscription) {
-          const subId =
-            typeof session.subscription === "string" ? session.subscription : session.subscription.id;
-          const stripeSub = await stripe.subscriptions.retrieve(subId);
-          await handleSubscriptionUpdated(stripeSub, session.metadata?.schoolId);
-          const schoolId = session.metadata?.schoolId;
-          if (schoolId) {
-            const subDoc = await SchoolSubscription.findOne({ schoolId });
-            if (subDoc) {
-              const sc = session.customer;
-              subDoc.stripeCustomerId = typeof sc === "string" ? sc : sc?.id;
-              subDoc.stripeSubscriptionId = subId;
-              await subDoc.save();
-            }
-          }
-        }
-        break;
-      }
-      default:
-        break;
+    const user = await User.findById(req.user.id);
+    if (!user || user.role !== "school_admin" || !user.schoolId) {
+      return res.status(403).json({ message: "Forbidden" });
     }
-  } catch (e) {
-    console.error("Webhook handler error:", e);
-    return res.status(500).json({ received: false });
-  }
 
-  res.json({ received: true });
+    const {
+      razorpay_payment_id,
+      razorpay_order_id,
+      razorpay_signature,
+    } = req.body || {};
+
+    if (!razorpay_payment_id || !razorpay_order_id || !razorpay_signature) {
+      return res.status(400).json({ message: "Missing Razorpay payment fields" });
+    }
+
+    if (
+      !verifyOrderPaymentSignature({
+        razorpay_payment_id,
+        razorpay_order_id,
+        razorpay_signature,
+      })
+    ) {
+      return res.status(400).json({ message: "Invalid payment signature" });
+    }
+
+    const { getRazorpay } = require("../utils/razorpayService");
+    const rzp = getRazorpay();
+    if (!rzp) {
+      return res.status(503).json({ message: "Razorpay not configured" });
+    }
+
+    const payment = await rzp.payments.fetch(razorpay_payment_id);
+    const notes = payment.notes || {};
+    const schoolId = notes.school_id || notes.schoolId;
+    if (!schoolId || String(schoolId) !== String(user.schoolId)) {
+      return res.status(403).json({ message: "Payment does not belong to your school" });
+    }
+
+    await handlePendingStudentsPaymentCaptured(payment);
+
+    return res.json({ message: "Pending students activated" });
+  } catch (err) {
+    console.error("verifyPendingStudentsPayment:", err);
+    return res.status(500).json({ message: err.message || "Verification failed" });
+  }
 };
 
-/** Used by cron — pre-renewal reminders only (no grace period). */
 exports.runSubscriptionReminderJobs = async () => {
   const subs = await SchoolSubscription.find({
     status: { $in: ["trialing", "active"] },
@@ -1152,10 +1016,6 @@ exports.runSubscriptionReminderJobs = async () => {
   }
 };
 
-/**
- * Used by cron — converts school trial rows to inactive once school trial window ends.
- * This is an explicit DB sync so status is visible in Mongo even before any API read.
- */
 exports.runTrialExpiryStatusSyncJob = async () => {
   const subs = await SchoolSubscription.find({ status: "trialing" })
     .select("schoolId status")

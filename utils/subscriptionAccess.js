@@ -4,18 +4,18 @@ const SchoolSubscription = require("../models/SchoolSubscription");
 /** Subscription states that allow access after the school-level free trial ends. */
 const PAID_ACCESS_STATUSES = ["active", "trialing"];
 
-function hasStripeSubscriptionId(sub) {
-  return Boolean(sub?.stripeSubscriptionId && String(sub.stripeSubscriptionId).trim());
+function hasRazorpaySubscriptionId(sub) {
+  return Boolean(sub?.razorpaySubscriptionId && String(sub.razorpaySubscriptionId).trim());
 }
 
 /**
- * After school trial ended: only count a paid sub if it has a Stripe id and billing
- * is anchored on/after school trial end (blocks legacy "trialing" rows from test checkouts during trial).
+ * After school trial ended: only count a paid sub if it has a Razorpay id and billing
+ * is anchored on/after school trial end (blocks legacy rows from test checkouts during trial).
  */
 function subscriptionAnchoredAfterSchoolTrial(sub, trialEndsAtDate) {
   if (!sub || !trialEndsAtDate) return false;
   if (!PAID_ACCESS_STATUSES.includes(sub.status)) return false;
-  if (!hasStripeSubscriptionId(sub)) return false;
+  if (!hasRazorpaySubscriptionId(sub)) return false;
   const trialEndMs = new Date(trialEndsAtDate).getTime();
   if (Number.isNaN(trialEndMs)) return false;
   const cps = sub.currentPeriodStart ? new Date(sub.currentPeriodStart).getTime() : NaN;
@@ -138,8 +138,8 @@ async function getSchoolBillingAccess(schoolId, options = {}) {
   const trialEndMs = trialEndsAt.getTime();
   const now = Date.now();
 
-  // School-level trial from verifiedAt: full app access, but Stripe checkout stays disabled
-  // until this window ends (even if Mongo/Stripe still has a subscription row from tests).
+  // School-level trial from verifiedAt: full app access, but Razorpay checkout stays disabled
+  // until this window ends (even if Mongo still has a subscription row from tests).
   if (now <= trialEndMs) {
     return {
       allowed: true,

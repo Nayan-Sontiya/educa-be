@@ -5,6 +5,7 @@ const STATUS_ENUM = [
   "trialing", // school approval trial window (4 weeks)
   "active", // paid subscription in good standing
   "inactive", // payment required / no valid subscription after trial
+  "pending", // Razorpay subscription created, awaiting first payment
 ];
 
 const schoolSubscriptionSchema = new mongoose.Schema(
@@ -18,17 +19,18 @@ const schoolSubscriptionSchema = new mongoose.Schema(
     },
     plan: { type: String, enum: PLAN_ENUM },
     /**
-     * per_seat: Stripe catalog price × active student quantity (see subscription catalog).
+     * per_seat: Razorpay plan unit amount × included student quantity.
      * dynamic_total: legacy — single line item, amount computed in app (quantity 1).
      */
     billingMode: { type: String, enum: ["per_seat", "dynamic_total"] },
-    /** Active students at last successful invoice / checkout */
+    /** Active students at last successful charge / checkout */
     billedStudentCount: { type: Number, default: 0, min: 0 },
     pricePerStudentYearInr: { type: Number, default: 300 },
     status: { type: String, enum: STATUS_ENUM, default: "inactive" },
-    stripeCustomerId: { type: String, trim: true },
-    stripeSubscriptionId: { type: String, trim: true },
-    stripePriceId: { type: String, trim: true },
+    razorpayCustomerId: { type: String, trim: true },
+    razorpaySubscriptionId: { type: String, trim: true },
+    razorpayPaymentId: { type: String, trim: true },
+    razorpayPlanId: { type: String, trim: true },
     currentPeriodStart: Date,
     currentPeriodEnd: Date,
     /** When grace started (payment failed) */
@@ -46,6 +48,12 @@ const schoolSubscriptionSchema = new mongoose.Schema(
     /** Platform admin manual access window */
     adminUnblockUntil: Date,
     adminNote: { type: String, trim: true },
+    pendingSeatActivation: {
+      provisional: Boolean,
+      targetBilledStudentCount: Number,
+      previousBilledStudentCount: Number,
+      invoiceId: String,
+    },
   },
   { timestamps: true }
 );

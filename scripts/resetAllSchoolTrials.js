@@ -4,7 +4,7 @@
  * Sets verifiedAt to "now" so the free trial window (SCHOOL_TRIAL_WEEKS, default 4)
  * restarts from this run for all of them. Does not change verificationStatus.
  *
- * Does NOT touch Stripe / SchoolSubscription (existing paid subs stay as-is in DB;
+ * Does NOT touch Razorpay / SchoolSubscription (existing paid subs stay as-is in DB;
  * access rules still apply from subscription status).
  *
  * For launch (trial + subscription status), prefer:
