@@ -5,6 +5,9 @@ const User = require("../models/User");
 const Subject = require("../models/Subject");
 const bcrypt = require("bcryptjs");
 const { normalizePhone, pickPhoneFromBody } = require("../utils/phone");
+const {
+  assertPhoneVerificationToken,
+} = require("./signupOtpController");
 
 function escapeRegex(str) {
   return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -26,12 +29,41 @@ exports.registerTeacher = async (req, res) => {
       return res.status(400).json({ message: "Phone number is required" });
     }
 
+    // Require a valid OTP-issued phoneVerificationToken matching this phone.
+    // Issued by POST /api/auth/signup/verify-otp on the public signup flow.
+    const phoneVerificationToken =
+      req.body?.phoneVerificationToken || req.body?.phoneToken;
+    const pvCheck = assertPhoneVerificationToken(
+      phoneVerificationToken,
+      phoneRaw,
+    );
+    if (!pvCheck.ok) {
+      return res.status(400).json({
+        message: pvCheck.message,
+        code: "PHONE_VERIFICATION_REQUIRED",
+      });
+    }
+
     const existingUser = await User.findOne({ email: email.trim() });
     if (existingUser)
       return res.status(400).json({ message: "Email already registered" });
 
-    const hash = await bcrypt.hash(password, 10);
+    // Defence in depth: also reject if the phone is already in use by another
+    // user (the OTP send step checks this too, but a token could be reused
+    // up to 15 minutes after issuance).
     const pn = normalizePhone(phoneRaw);
+    if (pn) {
+      const phoneTaken = await User.findOne({
+        $or: [{ phoneNormalized: pn }, { phone: pn }, { phone: phoneRaw }],
+      }).select("_id");
+      if (phoneTaken) {
+        return res
+          .status(400)
+          .json({ message: "Mobile number already registered" });
+      }
+    }
+
+    const hash = await bcrypt.hash(password, 10);
     const userPayload = {
       name: name.trim(),
       email: email.trim(),
@@ -121,27 +153,32 @@ exports.registerTeacher = async (req, res) => {
 // 🧾 0️⃣ Add Teacher by School Admin
 exports.addTeacherBySchoolAdmin = async (req, res) => {
   try {
-    const { name, email, subjectIds, status } = req.body;
+    const { name, email, password, subjectIds, status } = req.body;
     const phoneRaw = pickPhoneFromBody(req.body);
 
     if (!name || !email)
       return res.status(400).json({ message: "Name and email are required" });
 
-    // Prevent duplicates
-    const existingUser = await User.findOne({ email });
+    const existingUser = await User.findOne({ email: email.trim() });
     if (existingUser)
       return res.status(400).json({ message: "Email already exists" });
 
-    // School ID comes from the school_admin user
     const schoolId = req.user.schoolId;
 
-    // Generate temporary password (optional)
-    const tempPassword = Math.random().toString(36).slice(2, 10); // 8-char password
+    const providedPassword =
+      typeof password === "string" && password.trim().length >= 6
+        ? password
+        : null;
+    const generatedPassword = providedPassword
+      ? null
+      : Math.random().toString(36).slice(2, 10);
+    const plainPassword = providedPassword || generatedPassword;
+    const hash = await bcrypt.hash(plainPassword, 10);
 
     const userPayload = {
-      name,
-      email,
-      password: tempPassword,
+      name: name.trim(),
+      email: email.trim(),
+      password: hash,
       role: "teacher",
       schoolId,
     };
@@ -151,10 +188,8 @@ exports.addTeacherBySchoolAdmin = async (req, res) => {
       if (pn) userPayload.phoneNormalized = pn;
     }
 
-    // Create user
     const user = await User.create(userPayload);
 
-    // Create teacher profile (direct approved)
     const teacher = await Teacher.create({
       userId: user._id,
       schoolId,
@@ -163,11 +198,16 @@ exports.addTeacherBySchoolAdmin = async (req, res) => {
       status,
     });
 
-    res.status(201).json({
+    const response = {
       message: "Teacher added successfully",
       teacher,
-      tempPassword, // Optional: you can remove this if you don't want to show it.
-    });
+    };
+    if (generatedPassword) {
+      // Only surface the password back to the admin when we generated one
+      response.tempPassword = generatedPassword;
+    }
+
+    res.status(201).json(response);
   } catch (error) {
     console.error("Add Teacher Error:", error);
     res.status(500).json({ message: "Error adding teacher" });
@@ -336,17 +376,32 @@ exports.updateMyProfile = async (req, res) => {
   }
 };
 
-// 🧾 5️⃣ Delete a teacher (Admin only)
+// 🧾 5️⃣ Delete a teacher (Platform admin or school admin of the same school)
 exports.deleteTeacher = async (req, res) => {
   try {
     const teacher = await Teacher.findById(req.params.id);
     if (!teacher) return res.status(404).json({ message: "Teacher not found" });
+
+    if (req.user.role === "school_admin") {
+      const callerSchoolId = req.user.schoolId
+        ? String(req.user.schoolId)
+        : null;
+      const teacherSchoolId = teacher.schoolId
+        ? String(teacher.schoolId)
+        : null;
+      if (!callerSchoolId || callerSchoolId !== teacherSchoolId) {
+        return res
+          .status(403)
+          .json({ message: "You can only remove teachers from your own school" });
+      }
+    }
 
     await User.findByIdAndDelete(teacher.userId);
     await Teacher.findByIdAndDelete(req.params.id);
 
     res.json({ message: "Teacher deleted successfully" });
   } catch (error) {
+    console.error("Delete Teacher Error:", error);
     res.status(500).json({ message: "Error deleting teacher" });
   }
 };

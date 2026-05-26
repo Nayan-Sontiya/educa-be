@@ -11,7 +11,10 @@ const { createDefaultClasses } = require("../utils/createDefaultClasses");
 const { getRelativePath, getFileUrl, getFileUrls, convertDocumentsToUrls } = require("../utils/fileUrlHelper");
 const { normalizePhone } = require("../utils/phone");
 const { sendSms } = require("../utils/smsService");
-const SchoolRegistrationOtp = require("../models/SchoolRegistrationOtp");
+const {
+  createAndSendOtp: createMobileOtp,
+  consumeOtp: consumeMobileOtp,
+} = require("../utils/mobileOtpService");
 const {
   notifySchoolRegistered,
   notifySchoolStatusChanged,
@@ -534,41 +537,23 @@ exports.getSchoolsWithReviews = async (req, res) => {
 
 const SCHOOL_REG_OTP_TTL_MS = 10 * 60 * 1000;
 const SCHOOL_REG_OTP_MAX_ATTEMPTS = 5;
+const SCHOOL_REG_OTP_PURPOSE = "school_registration";
 
 /** POST /schools/send-otp — stores OTP server-side, sends SMS; never returns the code to the client */
 exports.sendOtp = async (req, res) => {
   try {
-    const { mobile } = req.body;
-    if (!mobile) {
-      return res.status(400).json({ message: "Mobile is required" });
-    }
+    const { mobile } = req.body || {};
 
-    const digits = normalizePhone(mobile);
-    if (digits.length < 10) {
-      return res.status(400).json({ message: "Enter a valid mobile number" });
-    }
-    const mobileNormalized = digits.slice(-10);
-
-    const code = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + SCHOOL_REG_OTP_TTL_MS);
-
-    await SchoolRegistrationOtp.deleteMany({ mobileNormalized });
-    await SchoolRegistrationOtp.create({
-      mobileNormalized,
-      code,
-      expiresAt,
-      attempts: 0,
+    const result = await createMobileOtp({
+      phone: mobile,
+      purpose: SCHOOL_REG_OTP_PURPOSE,
+      ttlMs: SCHOOL_REG_OTP_TTL_MS,
+      smsTemplate: (code) =>
+        `Your UtthanAI school registration verification code is ${code}. Valid for 10 minutes. Do not share this code.`,
     });
 
-    const smsText =
-      `Your UtthanAI school registration verification code is ${code}. Valid for 10 minutes. Do not share this code.`;
-
-    await sendSms(mobileNormalized, smsText);
-
-    if (!process.env.FAST2SMS_API_KEY) {
-      console.warn(
-        `[school registration OTP] FAST2SMS_API_KEY not set — SMS not sent. Stored OTP for ***${mobileNormalized.slice(-4)} (local/testing only; configure SMS for production).`,
-      );
+    if (!result.ok) {
+      return res.status(result.status).json({ message: result.message });
     }
 
     return res.json({
@@ -586,51 +571,19 @@ exports.sendOtp = async (req, res) => {
 /** POST /schools/verify-otp — checks stored OTP, rate-limited attempts */
 exports.verifyOtp = async (req, res) => {
   try {
-    const { mobile, otp } = req.body;
-    if (!mobile || !otp) {
-      return res
-        .status(400)
-        .json({ message: "Mobile number and verification code are required" });
-    }
-    const otpStr = String(otp).trim();
-    if (!/^[0-9]{6}$/.test(otpStr)) {
-      return res
-        .status(400)
-        .json({ message: "Enter the 6-digit code from your SMS" });
-    }
+    const { mobile, otp } = req.body || {};
 
-    const digits = normalizePhone(mobile);
-    if (digits.length < 10) {
-      return res.status(400).json({ message: "Enter a valid mobile number" });
-    }
-    const mobileNormalized = digits.slice(-10);
-
-    const record = await SchoolRegistrationOtp.findOne({ mobileNormalized }).sort({
-      createdAt: -1,
+    const result = await consumeMobileOtp({
+      phone: mobile,
+      otp,
+      purpose: SCHOOL_REG_OTP_PURPOSE,
+      maxAttempts: SCHOOL_REG_OTP_MAX_ATTEMPTS,
     });
 
-    if (!record || record.expiresAt < new Date()) {
-      return res.status(400).json({
-        message: "Code expired or not found. Request a new verification code.",
-      });
+    if (!result.ok) {
+      return res.status(result.status).json({ message: result.message });
     }
 
-    if (record.attempts >= SCHOOL_REG_OTP_MAX_ATTEMPTS) {
-      await SchoolRegistrationOtp.deleteOne({ _id: record._id });
-      return res.status(400).json({
-        message: "Too many incorrect attempts. Request a new verification code.",
-      });
-    }
-
-    if (record.code !== otpStr) {
-      await SchoolRegistrationOtp.updateOne(
-        { _id: record._id },
-        { $inc: { attempts: 1 } },
-      );
-      return res.status(400).json({ message: "Invalid verification code" });
-    }
-
-    await SchoolRegistrationOtp.deleteMany({ mobileNormalized });
     return res.json({ message: "Mobile verified successfully" });
   } catch (err) {
     console.error("verifyOtp:", err);

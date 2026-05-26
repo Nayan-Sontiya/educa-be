@@ -47,6 +47,11 @@ router.put(
   roleCheck(["teacher", "school_admin"]),
   updateMyProfile
 );
-router.delete("/:id", protect, roleCheck(["admin"]), deleteTeacher);
+router.delete(
+  "/:id",
+  protect,
+  roleCheck(["admin", "school_admin"]),
+  deleteTeacher
+);
 
 module.exports = router;
