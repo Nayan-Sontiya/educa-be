@@ -250,9 +250,21 @@ exports.createCheckoutSession = async (req, res) => {
     });
   } catch (err) {
     console.error("createCheckoutSession:", err);
-    const msg =
+    const raw =
       err?.error?.description || err?.error?.reason || err?.message || "Checkout failed";
-    return res.status(500).json({ message: msg });
+    const isRazorpayAuth =
+      /authentication failed/i.test(String(raw)) ||
+      err?.statusCode === 401 ||
+      (err?.error?.code === "BAD_REQUEST_ERROR" &&
+        /auth/i.test(String(err?.error?.description || "")));
+    if (isRazorpayAuth) {
+      return res.status(502).json({
+        message:
+          "Payment gateway authentication failed. Check RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET on the server (live keys for production, test keys for test mode — both must be from the same Razorpay account and mode).",
+        code: "RAZORPAY_AUTH_FAILED",
+      });
+    }
+    return res.status(500).json({ message: raw });
   }
 };
 
