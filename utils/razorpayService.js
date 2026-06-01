@@ -34,8 +34,11 @@ function isRazorpayConfigured() {
 const RAZORPAY_MAX_END_AT_SEC = 4765046400;
 const RAZORPAY_MIN_END_AT_SEC = 946684800;
 const RAZORPAY_ABSOLUTE_MAX_TOTAL_COUNT = 1200;
+/** UPI Autopay / QR mandate: expire_at cannot be more than 30 years from start. */
+const UPI_MANDATE_MAX_YEARS = 30;
 /** Customer must complete mandate auth within this window (seconds). */
 const SUBSCRIPTION_AUTH_EXPIRE_SEC = 30 * 60;
+const END_AT_BUFFER_SEC = 86400;
 
 function addOneBillingCycle(date, plan) {
   const d = new Date(date.getTime());
@@ -50,30 +53,43 @@ function addOneBillingCycle(date, plan) {
 }
 
 /**
+ * Latest allowed subscription end (seconds) for Standard Checkout with UPI.
+ * Stricter of: Razorpay global end_at cap (~year 2121) and UPI mandate 30-year limit.
+ */
+function maxEndAtSecForCheckout(startAtSec = Math.floor(Date.now() / 1000)) {
+  const start = new Date(startAtSec * 1000);
+  const upiLimit = new Date(start);
+  upiLimit.setFullYear(upiLimit.getFullYear() + UPI_MANDATE_MAX_YEARS);
+  const upiLimitSec = Math.floor(upiLimit.getTime() / 1000) - END_AT_BUFFER_SEC;
+  const globalCapSec = RAZORPAY_MAX_END_AT_SEC - END_AT_BUFFER_SEC;
+  return Math.min(globalCapSec, upiLimitSec);
+}
+
+/**
  * Max billing cycles using calendar month/year steps (Razorpay's model).
- * 1200 × 30-day estimate was too high — ~1200 calendar months from 2026 lands past year ~2126
- * and breaks Standard Checkout UPI QR (end_time validation at payment_initiation).
+ * Capped for UPI QR ("expire_at cannot be more than 30 years for upi") and global end_at.
  */
 function maxTotalCountForPlan(plan, startAtSec = Math.floor(Date.now() / 1000)) {
   const start = new Date(startAtSec * 1000);
+  const maxEndSec = maxEndAtSecForCheckout(startAtSec);
   let count = 0;
   let cursor = start;
   while (count < RAZORPAY_ABSOLUTE_MAX_TOTAL_COUNT) {
     const next = addOneBillingCycle(cursor, plan);
     const nextSec = Math.floor(next.getTime() / 1000);
-    if (nextSec > RAZORPAY_MAX_END_AT_SEC - 86400) break;
+    if (nextSec > maxEndSec) break;
     count += 1;
     cursor = next;
   }
   return Math.max(1, count);
 }
 
-function isEndAtWithinRazorpayBounds(endAtSec) {
+function isEndAtWithinRazorpayBounds(endAtSec, startAtSec = Math.floor(Date.now() / 1000)) {
   if (endAtSec == null || endAtSec === "") return true;
   const n = Number(endAtSec);
   if (!Number.isFinite(n)) return false;
   if (n > 1e12) return false;
-  return n >= RAZORPAY_MIN_END_AT_SEC && n <= RAZORPAY_MAX_END_AT_SEC;
+  return n >= RAZORPAY_MIN_END_AT_SEC && n <= maxEndAtSecForCheckout(startAtSec);
 }
 
 /**
@@ -503,7 +519,7 @@ async function createSchoolSubscription({
     const subscription = await rzp.subscriptions.create(payload);
     const rzEndAt = subscription?.end_at;
 
-    if (isEndAtWithinRazorpayBounds(rzEndAt)) {
+    if (isEndAtWithinRazorpayBounds(rzEndAt, startAtSec)) {
       return subscription;
     }
 

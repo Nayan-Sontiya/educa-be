@@ -264,11 +264,14 @@ exports.createCheckoutSession = async (req, res) => {
         code: "RAZORPAY_AUTH_FAILED",
       });
     }
-    if (/end_time must be between/i.test(String(raw))) {
+    if (
+      /end_time must be between/i.test(String(raw)) ||
+      /expire_at cannot be more than 30 years for upi/i.test(String(raw))
+    ) {
       return res.status(502).json({
         message:
-          "Payment gateway rejected subscription dates (UPI QR). Redeploy the latest backend, then try checkout again. If it persists, contact support.",
-        code: "RAZORPAY_END_TIME_INVALID",
+          "Payment gateway rejected subscription length for UPI (max 30 years). Redeploy the latest backend and try checkout again.",
+        code: "RAZORPAY_UPI_EXPIRE_INVALID",
       });
     }
     return res.status(500).json({ message: raw });
