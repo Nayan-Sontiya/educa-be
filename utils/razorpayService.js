@@ -30,42 +30,63 @@ function isRazorpayConfigured() {
   return Boolean(razorpayKeyId() && razorpayKeySecret());
 }
 
-/** Razorpay Unix bounds for end_at / end_time (seconds, not ms). */
+/** Razorpay Unix bounds for end_at / end_time (seconds, NOT milliseconds). */
 const RAZORPAY_MAX_END_AT_SEC = 4765046400;
+const RAZORPAY_MIN_END_AT_SEC = 946684800;
 const RAZORPAY_ABSOLUTE_MAX_TOTAL_COUNT = 1200;
+/** Customer must complete mandate auth within this window (seconds). */
+const SUBSCRIPTION_AUTH_EXPIRE_SEC = 30 * 60;
 
-/**
- * Conservative seconds per billing cycle so implied end_at stays under Razorpay max.
- * (1200 monthly cycles ≈ 100y and can exceed 4765046400 → UPI QR / checkout fails.)
- */
-function billingCycleSeconds(plan) {
+function addOneBillingCycle(date, plan) {
+  const d = new Date(date.getTime());
   const { period, interval } = razorpayIntervalForPlan(plan);
-  const daySec = 24 * 60 * 60;
-  if (period === "yearly") return 365 * daySec * (interval || 1);
-  return 30 * daySec * (interval || 1);
+  const step = interval || 1;
+  if (period === "yearly") {
+    d.setFullYear(d.getFullYear() + step);
+  } else {
+    d.setMonth(d.getMonth() + step);
+  }
+  return d;
 }
 
 /**
- * Max billing cycles for a plan without end_at passing Razorpay's upper bound (~year 2121).
+ * Max billing cycles using calendar month/year steps (Razorpay's model).
+ * 1200 × 30-day estimate was too high — ~1200 calendar months from 2026 lands past year ~2126
+ * and breaks Standard Checkout UPI QR (end_time validation at payment_initiation).
  */
 function maxTotalCountForPlan(plan, startAtSec = Math.floor(Date.now() / 1000)) {
-  const cycleSec = billingCycleSeconds(plan);
-  const headroom = RAZORPAY_MAX_END_AT_SEC - startAtSec - cycleSec;
-  if (headroom <= 0) return 1;
-  return Math.max(1, Math.min(RAZORPAY_ABSOLUTE_MAX_TOTAL_COUNT, Math.floor(headroom / cycleSec)));
+  const start = new Date(startAtSec * 1000);
+  let count = 0;
+  let cursor = start;
+  while (count < RAZORPAY_ABSOLUTE_MAX_TOTAL_COUNT) {
+    const next = addOneBillingCycle(cursor, plan);
+    const nextSec = Math.floor(next.getTime() / 1000);
+    if (nextSec > RAZORPAY_MAX_END_AT_SEC - 86400) break;
+    count += 1;
+    cursor = next;
+  }
+  return Math.max(1, count);
+}
+
+function isEndAtWithinRazorpayBounds(endAtSec) {
+  if (endAtSec == null || endAtSec === "") return true;
+  const n = Number(endAtSec);
+  if (!Number.isFinite(n)) return false;
+  if (n > 1e12) return false;
+  return n >= RAZORPAY_MIN_END_AT_SEC && n <= RAZORPAY_MAX_END_AT_SEC;
 }
 
 /**
  * Razorpay requires total_count >= 1 when end_at is omitted.
  * Capped per plan so subscription end_at (and Checkout UPI QR end_time) stay valid.
  */
-function subscriptionTotalCount(plan) {
+function subscriptionTotalCount(plan, startAtSec = Math.floor(Date.now() / 1000)) {
   const envN = Number(process.env.RAZORPAY_SUBSCRIPTION_TOTAL_COUNT);
   const requested =
     Number.isFinite(envN) && envN >= 1
       ? Math.min(RAZORPAY_ABSOLUTE_MAX_TOTAL_COUNT, Math.floor(envN))
       : RAZORPAY_ABSOLUTE_MAX_TOTAL_COUNT;
-  const capped = maxTotalCountForPlan(plan);
+  const capped = maxTotalCountForPlan(plan, startAtSec);
   if (requested > capped) {
     console.warn(
       `[razorpay] RAZORPAY_SUBSCRIPTION_TOTAL_COUNT=${requested} too high for plan "${plan}" ` +
@@ -457,21 +478,50 @@ async function createSchoolSubscription({
   const rzp = getRazorpay();
   if (!rzp) throw new Error("Razorpay is not configured");
 
-  const subscription = await rzp.subscriptions.create({
-    plan_id: planId,
-    customer_id: customerId,
-    quantity: Math.max(1, quantity),
-    customer_notify: 1,
-    total_count: subscriptionTotalCount(plan),
-    notes: {
-      schoolId: String(schoolId),
-      plan,
-      mongoSubscriptionId: String(mongoSubscriptionId),
-      billedSeatQuantity: String(quantity),
-    },
-  });
+  const startAtSec = Math.floor(Date.now() / 1000);
+  const expireBySec = startAtSec + SUBSCRIPTION_AUTH_EXPIRE_SEC;
+  let totalCount = subscriptionTotalCount(plan, startAtSec);
 
-  return subscription;
+  const notes = {
+    schoolId: String(schoolId),
+    plan,
+    mongoSubscriptionId: String(mongoSubscriptionId),
+    billedSeatQuantity: String(quantity),
+  };
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const payload = {
+      plan_id: planId,
+      customer_id: customerId,
+      quantity: Math.max(1, quantity),
+      customer_notify: 1,
+      total_count: totalCount,
+      expire_by: expireBySec,
+      notes,
+    };
+
+    const subscription = await rzp.subscriptions.create(payload);
+    const rzEndAt = subscription?.end_at;
+
+    if (isEndAtWithinRazorpayBounds(rzEndAt)) {
+      return subscription;
+    }
+
+    console.warn(
+      `[razorpay] subscription ${subscription?.id} end_at=${rzEndAt} out of bounds ` +
+        `(total_count=${totalCount}, plan=${plan}) — retrying`,
+    );
+    try {
+      await rzp.subscriptions.cancel(subscription.id, false);
+    } catch (cancelErr) {
+      console.warn("[razorpay] cancel invalid subscription:", cancelErr?.message || cancelErr);
+    }
+    totalCount = Math.max(1, Math.floor(totalCount * 0.7));
+  }
+
+  throw new Error(
+    "Could not create a subscription within Razorpay date limits. Contact support.",
+  );
 }
 
 async function fetchSubscription(subscriptionId) {
