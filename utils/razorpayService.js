@@ -30,15 +30,49 @@ function isRazorpayConfigured() {
   return Boolean(razorpayKeyId() && razorpayKeySecret());
 }
 
+/** Razorpay Unix bounds for end_at / end_time (seconds, not ms). */
+const RAZORPAY_MAX_END_AT_SEC = 4765046400;
+const RAZORPAY_ABSOLUTE_MAX_TOTAL_COUNT = 1200;
+
+/**
+ * Conservative seconds per billing cycle so implied end_at stays under Razorpay max.
+ * (1200 monthly cycles ≈ 100y and can exceed 4765046400 → UPI QR / checkout fails.)
+ */
+function billingCycleSeconds(plan) {
+  const { period, interval } = razorpayIntervalForPlan(plan);
+  const daySec = 24 * 60 * 60;
+  if (period === "yearly") return 365 * daySec * (interval || 1);
+  return 30 * daySec * (interval || 1);
+}
+
+/**
+ * Max billing cycles for a plan without end_at passing Razorpay's upper bound (~year 2121).
+ */
+function maxTotalCountForPlan(plan, startAtSec = Math.floor(Date.now() / 1000)) {
+  const cycleSec = billingCycleSeconds(plan);
+  const headroom = RAZORPAY_MAX_END_AT_SEC - startAtSec - cycleSec;
+  if (headroom <= 0) return 1;
+  return Math.max(1, Math.min(RAZORPAY_ABSOLUTE_MAX_TOTAL_COUNT, Math.floor(headroom / cycleSec)));
+}
+
 /**
  * Razorpay requires total_count >= 1 when end_at is omitted.
- * Use a high cycle count; schools can cancel early via API (like Stripe until-cancelled).
- * Max 1200 per Razorpay docs.
+ * Capped per plan so subscription end_at (and Checkout UPI QR end_time) stay valid.
  */
-function subscriptionTotalCount() {
-  const n = Number(process.env.RAZORPAY_SUBSCRIPTION_TOTAL_COUNT);
-  if (Number.isFinite(n) && n >= 1) return Math.min(1200, Math.floor(n));
-  return 1200;
+function subscriptionTotalCount(plan) {
+  const envN = Number(process.env.RAZORPAY_SUBSCRIPTION_TOTAL_COUNT);
+  const requested =
+    Number.isFinite(envN) && envN >= 1
+      ? Math.min(RAZORPAY_ABSOLUTE_MAX_TOTAL_COUNT, Math.floor(envN))
+      : RAZORPAY_ABSOLUTE_MAX_TOTAL_COUNT;
+  const capped = maxTotalCountForPlan(plan);
+  if (requested > capped) {
+    console.warn(
+      `[razorpay] RAZORPAY_SUBSCRIPTION_TOTAL_COUNT=${requested} too high for plan "${plan}" ` +
+        `(max ${capped} before end_at cap) — using ${capped}`,
+    );
+  }
+  return Math.min(requested, capped);
 }
 
 let _client = null;
@@ -428,7 +462,7 @@ async function createSchoolSubscription({
     customer_id: customerId,
     quantity: Math.max(1, quantity),
     customer_notify: 1,
-    total_count: subscriptionTotalCount(),
+    total_count: subscriptionTotalCount(plan),
     notes: {
       schoolId: String(schoolId),
       plan,
