@@ -9,6 +9,13 @@ function hasRazorpaySubscriptionId(sub) {
   return Boolean(sub?.razorpaySubscriptionId && String(sub.razorpaySubscriptionId).trim());
 }
 
+/** Paid via one-time order or legacy Razorpay subscription. */
+function hasPaidSubscriptionProof(sub) {
+  if (!sub) return false;
+  if (hasRazorpaySubscriptionId(sub)) return true;
+  return Boolean(sub.lastPaymentAt && sub.currentPeriodStart);
+}
+
 function envDefaultTrialWeeks() {
   const weeks = Number(process.env.SCHOOL_TRIAL_WEEKS);
   if (!Number.isFinite(weeks) || weeks < 0) return 4;
@@ -89,7 +96,7 @@ function trialDurationMs(billing) {
 function subscriptionAnchoredAfterSchoolTrial(sub, trialEndsAtDate) {
   if (!sub || !trialEndsAtDate) return false;
   if (!PAID_ACCESS_STATUSES.includes(sub.status)) return false;
-  if (!hasRazorpaySubscriptionId(sub)) return false;
+  if (!hasPaidSubscriptionProof(sub)) return false;
   const trialEndMs = new Date(trialEndsAtDate).getTime();
   if (Number.isNaN(trialEndMs)) return false;
   const cps = sub.currentPeriodStart ? new Date(sub.currentPeriodStart).getTime() : NaN;

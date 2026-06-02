@@ -24,8 +24,23 @@ function razorpayIntervalForPlan(plan) {
   throw new Error("Invalid plan");
 }
 
+/** Billing period after a one-time plan payment (not Razorpay subscription cycles). */
+function periodBoundsForPlan(plan, startDate = new Date()) {
+  const start =
+    startDate instanceof Date ? new Date(startDate.getTime()) : new Date(startDate);
+  const end = new Date(start.getTime());
+  const { period, interval } = razorpayIntervalForPlan(plan);
+  if (period === "yearly") {
+    end.setFullYear(end.getFullYear() + interval);
+  } else {
+    end.setMonth(end.getMonth() + interval);
+  }
+  return { currentPeriodStart: start, currentPeriodEnd: end };
+}
+
 module.exports = {
   yearlyTotalPaise,
   planAmountPaise,
   razorpayIntervalForPlan,
+  periodBoundsForPlan,
 };

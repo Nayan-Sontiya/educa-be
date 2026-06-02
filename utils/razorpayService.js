@@ -578,6 +578,38 @@ async function createPendingStudentsOrder({ amountPaise, schoolId, pendingCount 
   });
 }
 
+/** One-time school plan payment (no UPI mandate / subscription). */
+async function createSchoolPlanOrder({
+  amountPaise,
+  schoolId,
+  plan,
+  mongoSubscriptionId,
+  seatCount,
+}) {
+  const rzp = getRazorpay();
+  if (!rzp) throw new Error("Razorpay is not configured");
+
+  return rzp.orders.create({
+    amount: Math.max(100, amountPaise),
+    currency: "INR",
+    receipt: `sub_${String(schoolId).slice(-8)}_${Date.now()}`,
+    notes: {
+      type: "school_plan",
+      school_id: String(schoolId),
+      schoolId: String(schoolId),
+      plan,
+      mongoSubscriptionId: String(mongoSubscriptionId),
+      seat_count: String(seatCount),
+    },
+  });
+}
+
+async function fetchOrder(orderId) {
+  const rzp = getRazorpay();
+  if (!rzp || !orderId) return null;
+  return rzp.orders.fetch(orderId);
+}
+
 function mapRazorpaySubscriptionStatus(rzpStatus) {
   const s = String(rzpStatus || "").toLowerCase();
   if (s === "active" || s === "authenticated") return "active";
@@ -614,6 +646,8 @@ module.exports = {
   updateSubscriptionQuantity,
   cancelSubscription,
   createPendingStudentsOrder,
+  createSchoolPlanOrder,
+  fetchOrder,
   mapRazorpaySubscriptionStatus,
   periodBoundsFromRazorpaySubscription,
   fetchRazorpayPlan,

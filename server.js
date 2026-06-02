@@ -14,7 +14,7 @@ const subscriptionController = require("./controllers/subscriptionController");
 
 // Razorpay webhook must receive raw body (before express.json)
 app.post(
-  "/api/subscription/webhook",
+  "/api/subscription/razorpay/webhook",
   express.raw({ type: "application/json" }),
   (req, res) => subscriptionController.handleRazorpayWebhook(req, res)
 );

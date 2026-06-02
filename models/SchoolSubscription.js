@@ -29,6 +29,8 @@ const schoolSubscriptionSchema = new mongoose.Schema(
     status: { type: String, enum: STATUS_ENUM, default: "inactive" },
     razorpayCustomerId: { type: String, trim: true },
     razorpaySubscriptionId: { type: String, trim: true },
+    /** Latest one-time checkout order (school plan); not a recurring mandate. */
+    razorpayOrderId: { type: String, trim: true },
     razorpayPaymentId: { type: String, trim: true },
     razorpayPlanId: { type: String, trim: true },
     currentPeriodStart: Date,

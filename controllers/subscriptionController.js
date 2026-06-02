@@ -10,7 +10,7 @@ const {
   resolvePendingStudentsAmountInr,
   countPendingActivationStudents,
 } = require("../utils/pendingStudentsEnrollment");
-const { planAmountPaise } = require("../utils/subscriptionPricing");
+const { planAmountPaise, periodBoundsForPlan } = require("../utils/subscriptionPricing");
 const { getSchoolBillingAccess, trialEndsAtFromSchool } = require("../utils/subscriptionAccess");
 const {
   countRosterActiveStudents,
@@ -27,7 +27,7 @@ const {
   verifyOrderPaymentSignature,
   loadSubscriptionCatalogPrices,
   ensureRazorpayCustomer,
-  createSchoolSubscription,
+  createSchoolPlanOrder,
   fetchSubscription,
   resolvePlanId,
   updateSubscriptionQuantity,
@@ -125,6 +125,31 @@ async function applyRazorpaySubscriptionToMongo(subDoc, rzpSub, { paymentId, for
   return subDoc;
 }
 
+async function applySchoolPlanPaymentToMongo(subDoc, { paymentId, orderId, plan, seatCount } = {}) {
+  if (!subDoc) return subDoc;
+
+  const planKey = plan && PLAN_KEYS.includes(plan) ? plan : subDoc.plan;
+  if (planKey) subDoc.plan = planKey;
+  if (seatCount != null) {
+    subDoc.billedStudentCount = Math.max(1, Number(seatCount) || subDoc.billedStudentCount);
+  }
+  if (orderId) subDoc.razorpayOrderId = orderId;
+  if (paymentId) subDoc.razorpayPaymentId = paymentId;
+
+  const bounds = periodBoundsForPlan(subDoc.plan, new Date());
+  subDoc.currentPeriodStart = bounds.currentPeriodStart;
+  subDoc.currentPeriodEnd = bounds.currentPeriodEnd;
+  subDoc.status = "active";
+  subDoc.graceStartedAt = undefined;
+  subDoc.graceEndsAt = undefined;
+  subDoc.graceReminderDay = undefined;
+  subDoc.remindersSent = { preDue3: false, preDue2: false, preDue1: false };
+  subDoc.lastPaymentAt = new Date();
+
+  await subDoc.save();
+  return subDoc;
+}
+
 /**
  * POST /api/subscription/checkout — school_admin
  * body: { plan: "monthly"|"quarterly"|"yearly" } (priceId accepted as plan id alias)
@@ -209,34 +234,36 @@ exports.createCheckoutSession = async (req, res) => {
       subDoc.status = "pending";
     }
 
-    const razorpayPlanId = await resolvePlanId(plan, billing.pricePerStudentYearInr);
-    subDoc.razorpayPlanId = razorpayPlanId;
+    try {
+      const razorpayPlanId = await resolvePlanId(plan, billing.pricePerStudentYearInr);
+      subDoc.razorpayPlanId = razorpayPlanId;
+    } catch (planErr) {
+      console.warn("checkout resolvePlanId (optional for one-time order):", planErr?.message || planErr);
+    }
 
     const customerId = await ensureRazorpayCustomer(subDoc, school);
     subDoc.razorpayCustomerId = customerId;
     await subDoc.save();
 
-    const rzpSubscription = await createSchoolSubscription({
-      plan,
-      planId: razorpayPlanId,
-      quantity: includedSeats,
-      customerId,
+    const amountPaise = unitPaise * includedSeats;
+    const order = await createSchoolPlanOrder({
+      amountPaise,
       schoolId: school._id,
+      plan,
       mongoSubscriptionId: subDoc._id,
+      seatCount: includedSeats,
     });
 
-    subDoc.razorpaySubscriptionId = rzpSubscription.id;
+    subDoc.razorpayOrderId = order.id;
     await subDoc.save();
-
-    const amountPaise = unitPaise * includedSeats;
 
     const callbackUrl = `${returnBase}/dashboard/subscription?sub=success`;
 
     return res.json({
       data: {
         keyId: razorpayKeyId(),
-        subscriptionId: rzpSubscription.id,
-        shortUrl: rzpSubscription.short_url || null,
+        orderId: order.id,
+        checkoutType: "order",
         plan,
         quantity: includedSeats,
         amountPaise,
@@ -262,16 +289,6 @@ exports.createCheckoutSession = async (req, res) => {
         message:
           "Payment gateway authentication failed. Check RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET on the server (live keys for production, test keys for test mode — both must be from the same Razorpay account and mode).",
         code: "RAZORPAY_AUTH_FAILED",
-      });
-    }
-    if (
-      /end_time must be between/i.test(String(raw)) ||
-      /expire_at cannot be more than 30 years for upi/i.test(String(raw))
-    ) {
-      return res.status(502).json({
-        message:
-          "Payment gateway rejected subscription length for UPI (max 30 years). Redeploy the latest backend and try checkout again.",
-        code: "RAZORPAY_UPI_EXPIRE_INVALID",
       });
     }
     return res.status(500).json({ message: raw });
@@ -375,6 +392,7 @@ exports.getSubscriptionStatus = async (req, res) => {
         lastPaymentAt: sub?.lastPaymentAt,
         billingMode: sub?.billingMode || null,
         razorpayConfigured: isRazorpayConfigured(),
+        razorpayOrderId: sub?.razorpayOrderId || null,
         razorpaySubscriptionId: sub?.razorpaySubscriptionId || null,
         trialEndsAt: trialAccess.trialEndsAt,
         inTrial: trialAccess.inTrial,
@@ -402,7 +420,9 @@ exports.syncStudentCount = async (req, res) => {
 
     const sub = await SchoolSubscription.findOne({ schoolId: user.schoolId });
     if (!sub?.razorpaySubscriptionId) {
-      return res.status(400).json({ message: "No active Razorpay subscription to update" });
+      return res.status(400).json({
+        message: "Seat sync is only for recurring Razorpay subscriptions. One-time payments do not need sync.",
+      });
     }
 
     const billing = await getBillingSettingsDoc();
@@ -429,7 +449,8 @@ exports.syncStudentCount = async (req, res) => {
 
 /**
  * POST /api/subscription/verify-payment — school_admin
- * body: { razorpay_payment_id, razorpay_subscription_id, razorpay_signature }
+ * body (one-time): { razorpay_payment_id, razorpay_order_id, razorpay_signature }
+ * body (legacy mandate): { razorpay_payment_id, razorpay_subscription_id, razorpay_signature }
  */
 exports.verifyPayment = async (req, res) => {
   try {
@@ -456,31 +477,12 @@ exports.verifyPayment = async (req, res) => {
     const {
       razorpay_payment_id,
       razorpay_subscription_id,
+      razorpay_order_id,
       razorpay_signature,
     } = req.body || {};
 
-    if (!razorpay_payment_id || !razorpay_subscription_id || !razorpay_signature) {
-      return res.status(400).json({ message: "razorpay_payment_id, razorpay_subscription_id, razorpay_signature are required" });
-    }
-
-    if (
-      !verifySubscriptionPaymentSignature({
-        razorpay_payment_id,
-        razorpay_subscription_id,
-        razorpay_signature,
-      })
-    ) {
-      return res.status(400).json({ message: "Invalid payment signature" });
-    }
-
-    const rzpSub = await fetchSubscription(razorpay_subscription_id);
-    if (!rzpSub) {
-      return res.status(404).json({ message: "Subscription not found in Razorpay" });
-    }
-
-    const notesSchoolId = rzpSub.notes?.schoolId ? String(rzpSub.notes.schoolId) : null;
-    if (!notesSchoolId || notesSchoolId !== String(user.schoolId)) {
-      return res.status(403).json({ message: "This subscription does not belong to your school" });
+    if (!razorpay_payment_id || !razorpay_signature) {
+      return res.status(400).json({ message: "razorpay_payment_id and razorpay_signature are required" });
     }
 
     const subDoc = await SchoolSubscription.findOne({ schoolId: user.schoolId });
@@ -488,16 +490,76 @@ exports.verifyPayment = async (req, res) => {
       return res.status(404).json({ message: "School subscription record not found" });
     }
 
-    await applyRazorpaySubscriptionToMongo(subDoc, rzpSub, {
-      paymentId: razorpay_payment_id,
-      forceActive: true,
-    });
+    if (razorpay_order_id) {
+      if (
+        !verifyOrderPaymentSignature({
+          razorpay_payment_id,
+          razorpay_order_id,
+          razorpay_signature,
+        })
+      ) {
+        return res.status(400).json({ message: "Invalid payment signature" });
+      }
+
+      const { getRazorpay } = require("../utils/razorpayService");
+      const rzp = getRazorpay();
+      if (!rzp) {
+        return res.status(503).json({ message: "Razorpay not configured" });
+      }
+
+      const payment = await rzp.payments.fetch(razorpay_payment_id);
+      const notes = payment.notes || {};
+      if (notes.type !== "school_plan") {
+        return res.status(400).json({ message: "Payment is not a school plan order" });
+      }
+      const schoolId = notes.school_id || notes.schoolId;
+      if (!schoolId || String(schoolId) !== String(user.schoolId)) {
+        return res.status(403).json({ message: "Payment does not belong to your school" });
+      }
+
+      await applySchoolPlanPaymentToMongo(subDoc, {
+        paymentId: razorpay_payment_id,
+        orderId: razorpay_order_id,
+        plan: notes.plan,
+        seatCount: Number(notes.seat_count),
+      });
+    } else if (razorpay_subscription_id) {
+      if (
+        !verifySubscriptionPaymentSignature({
+          razorpay_payment_id,
+          razorpay_subscription_id,
+          razorpay_signature,
+        })
+      ) {
+        return res.status(400).json({ message: "Invalid payment signature" });
+      }
+
+      const rzpSub = await fetchSubscription(razorpay_subscription_id);
+      if (!rzpSub) {
+        return res.status(404).json({ message: "Subscription not found in Razorpay" });
+      }
+
+      const notesSchoolId = rzpSub.notes?.schoolId ? String(rzpSub.notes.schoolId) : null;
+      if (!notesSchoolId || notesSchoolId !== String(user.schoolId)) {
+        return res.status(403).json({ message: "This subscription does not belong to your school" });
+      }
+
+      await applyRazorpaySubscriptionToMongo(subDoc, rzpSub, {
+        paymentId: razorpay_payment_id,
+        forceActive: true,
+      });
+    } else {
+      return res.status(400).json({
+        message: "razorpay_order_id (one-time) or razorpay_subscription_id (legacy) is required",
+      });
+    }
 
     const refreshed = await SchoolSubscription.findOne({ schoolId: user.schoolId }).lean();
     return res.json({
       message: "Payment verified",
       data: {
         status: subscriptionStatusForClient(refreshed?.status),
+        razorpayOrderId: refreshed?.razorpayOrderId,
         razorpaySubscriptionId: refreshed?.razorpaySubscriptionId,
         currentPeriodEnd: refreshed?.currentPeriodEnd,
       },
@@ -513,7 +575,7 @@ exports.confirmCheckoutSession = exports.verifyPayment;
 
 /**
  * POST /api/subscription/sync-from-razorpay — school_admin
- * After redirect when Razorpay omits payment query params; pulls live status from Razorpay API.
+ * Legacy recurring-subscription fallback.
  */
 exports.syncSubscriptionFromRazorpay = async (req, res) => {
   try {
@@ -524,7 +586,9 @@ exports.syncSubscriptionFromRazorpay = async (req, res) => {
 
     const subDoc = await SchoolSubscription.findOne({ schoolId: user.schoolId });
     if (!subDoc?.razorpaySubscriptionId) {
-      return res.status(400).json({ message: "No Razorpay subscription to sync" });
+      return res.status(400).json({
+        message: "No recurring Razorpay subscription to sync. Use verify-payment after order checkout.",
+      });
     }
 
     const rzpSub = await fetchSubscription(subDoc.razorpaySubscriptionId);
