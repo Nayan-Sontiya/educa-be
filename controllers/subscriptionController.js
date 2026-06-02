@@ -62,6 +62,15 @@ function webAppBase() {
   ).replace(/\/$/, "");
 }
 
+/** Razorpay redirect checkout POSTs to callback_url; Next.js pages are GET-only. */
+function razorpayCallbackUrl(returnBase, { returnPath, payment, sub }) {
+  const params = new URLSearchParams();
+  params.set("return", returnPath);
+  if (payment) params.set("payment", payment);
+  if (sub) params.set("sub", sub);
+  return `${returnBase}/api/razorpay/callback?${params.toString()}`;
+}
+
 function schoolHasBillingAddress(school) {
   return Boolean(
     school?.name?.trim() &&
@@ -257,7 +266,10 @@ exports.createCheckoutSession = async (req, res) => {
     subDoc.razorpayOrderId = order.id;
     await subDoc.save();
 
-    const callbackUrl = `${returnBase}/dashboard/subscription?sub=success`;
+    const callbackUrl = razorpayCallbackUrl(returnBase, {
+      returnPath: "/dashboard/subscription",
+      sub: "success",
+    });
 
     return res.json({
       data: {
@@ -982,7 +994,10 @@ exports.createPendingStudentsCheckout = async (req, res) => {
       pendingCount,
     });
 
-    const callbackUrl = `${returnBase}/dashboard/students?payment=success`;
+    const callbackUrl = razorpayCallbackUrl(returnBase, {
+      returnPath: "/dashboard/students",
+      payment: "success",
+    });
 
     return res.json({
       data: {
