@@ -310,12 +310,14 @@ exports.createCheckoutSession = async (req, res) => {
 exports.getPublicSubscriptionCatalog = async (req, res) => {
   try {
     const billing = await getBillingSettingsDoc();
-    const base = await loadSubscriptionCatalogPrices(0, billing.pricePerStudentYearInr);
+    const force = req.query.refresh === "1" || req.query.refresh === "true";
+    const base = await loadSubscriptionCatalogPrices(0, billing.pricePerStudentYearInr, { force });
     return res.json({
       data: {
         razorpayConfigured: base.razorpayConfigured,
         product: base.product,
         prices: base.prices,
+        planWarnings: base.planWarnings || [],
       },
     });
   } catch (err) {
@@ -334,13 +336,17 @@ exports.getSubscriptionCatalog = async (req, res) => {
     const billing = await getBillingSettingsDoc();
     const rosterCount = await countRosterActiveStudents(user.schoolId);
     const includedSeatCount = await countIncludedSeatStudents(user.schoolId);
-    const base = await loadSubscriptionCatalogPrices(includedSeatCount, billing.pricePerStudentYearInr);
+    const force = req.query.refresh === "1" || req.query.refresh === "true";
+    const base = await loadSubscriptionCatalogPrices(includedSeatCount, billing.pricePerStudentYearInr, {
+      force,
+    });
 
     return res.json({
       data: {
         razorpayConfigured: base.razorpayConfigured,
         product: base.product,
         prices: base.prices,
+        planWarnings: base.planWarnings || [],
         activeStudentCount: rosterCount,
         includedSeatStudentCount: includedSeatCount,
       },

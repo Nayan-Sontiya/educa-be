@@ -4,6 +4,13 @@ const { planAmountPaise, razorpayIntervalForPlan } = require("./subscriptionPric
 
 const PLAN_KEYS = ["monthly", "quarterly", "yearly"];
 
+/** UtthanAI Razorpay Dashboard plans (override via RAZORPAY_PLAN_*_ID env). */
+const DEFAULT_RAZORPAY_PLAN_IDS = {
+  monthly: "plan_SxENzCjfGpbGus",
+  quarterly: "plan_SxENZseE1OcEEe",
+  yearly: "plan_SxEOmKaHzwrWZU",
+};
+
 /** Cache Razorpay plan list (same idea as live Stripe price list). */
 const PLAN_SYNC_TTL_MS = Number(process.env.RAZORPAY_PLAN_SYNC_TTL_MS) || 120000;
 let _planSyncCache = { at: 0, byPlan: null };
@@ -127,8 +134,9 @@ function getRazorpay() {
 
 function envPlanId(plan) {
   const key = `RAZORPAY_PLAN_${String(plan).toUpperCase()}_ID`;
-  const v = process.env[key];
-  return typeof v === "string" ? v.trim() : "";
+  const fromEnv = process.env[key];
+  if (typeof fromEnv === "string" && fromEnv.trim()) return fromEnv.trim();
+  return DEFAULT_RAZORPAY_PLAN_IDS[plan] || "";
 }
 
 function verifyWebhookSignature(rawBody, signature) {
@@ -174,14 +182,28 @@ function planDisplayMeta(plan) {
   return { intervalLabel: "per period", period: "monthly", interval: 1 };
 }
 
+function razorpayErrorMessage(err) {
+  return (
+    err?.error?.description ||
+    err?.error?.reason ||
+    err?.message ||
+    String(err || "Unknown Razorpay error")
+  );
+}
+
 async function fetchRazorpayPlan(planId) {
   const rzp = getRazorpay();
   if (!rzp || !planId) return null;
   try {
     return await rzp.plans.fetch(planId);
-  } catch {
+  } catch (err) {
+    console.error(`[razorpay] plans.fetch(${planId}):`, razorpayErrorMessage(err));
     return null;
   }
+}
+
+function invalidateRazorpayPlanCache() {
+  _planSyncCache = { at: 0, byPlan: null };
 }
 
 /**
@@ -272,26 +294,33 @@ async function syncRazorpayPlansByCadence({ force = false } = {}) {
 
   const map = new Map();
 
-  try {
-    const allPlans = await fetchAllRazorpayPlansFromApi();
-    for (const rzpPlan of allPlans) {
-      const key = inferPlanKeyFromRazorpayPlan(rzpPlan);
-      if (!key) continue;
-
-      const existing = map.get(key);
-      if (!existing || planPreferScore(rzpPlan, key) > planPreferScore(existing, key)) {
-        map.set(key, rzpPlan);
-      }
-    }
-  } catch (err) {
-    console.error("[razorpay] syncRazorpayPlansByCadence:", err.message || err);
-  }
-
+  // 1) Env-configured plan IDs always win (never show stale auto-matched plans).
   for (const planKey of PLAN_KEYS) {
     const envId = envPlanId(planKey);
     if (!envId) continue;
     const fetched = await fetchRazorpayPlan(envId);
-    if (fetched) map.set(planKey, fetched);
+    if (fetched?.id) {
+      map.set(planKey, fetched);
+    }
+  }
+
+  // 2) Only fill cadences still missing after env fetch.
+  const missingKeys = PLAN_KEYS.filter((k) => !map.has(k));
+  if (missingKeys.length > 0) {
+    try {
+      const allPlans = await fetchAllRazorpayPlansFromApi();
+      for (const rzpPlan of allPlans) {
+        const key = inferPlanKeyFromRazorpayPlan(rzpPlan);
+        if (!key || !missingKeys.includes(key) || map.has(key)) continue;
+
+        const existing = map.get(key);
+        if (!existing || planPreferScore(rzpPlan, key) > planPreferScore(existing, key)) {
+          map.set(key, rzpPlan);
+        }
+      }
+    } catch (err) {
+      console.error("[razorpay] syncRazorpayPlansByCadence:", razorpayErrorMessage(err));
+    }
   }
 
   _planSyncCache = { at: Date.now(), byPlan: map };
@@ -331,6 +360,15 @@ async function createRazorpayPlan(plan, pricePerStudentYearInr) {
 }
 
 async function resolvePlanId(plan, pricePerStudentYearInr) {
+  const configuredId = envPlanId(plan);
+  if (configuredId) {
+    const fromEnv = await fetchRazorpayPlan(configuredId);
+    if (fromEnv?.id) return fromEnv.id;
+    console.warn(
+      `[razorpay] Plan ${configuredId} for "${plan}" not found in Razorpay — check keys match this account.`,
+    );
+  }
+
   const synced = await syncRazorpayPlansByCadence();
   const fromDashboard = synced.get(plan);
   if (fromDashboard?.id) return fromDashboard.id;
@@ -348,21 +386,44 @@ async function resolvePlanId(plan, pricePerStudentYearInr) {
 /**
  * Catalog rows for monthly / quarterly / yearly (per-seat unit amounts).
  */
-async function loadSubscriptionCatalogPrices(includedSeatCount, pricePerStudentYearInr) {
+async function loadSubscriptionCatalogPrices(
+  includedSeatCount,
+  pricePerStudentYearInr,
+  { force = false } = {}
+) {
   if (!isRazorpayConfigured()) {
-    return { razorpayConfigured: false, plansSyncedFromDashboard: false, product: null, prices: [] };
+    return {
+      razorpayConfigured: false,
+      plansSyncedFromDashboard: false,
+      product: null,
+      prices: [],
+      planWarnings: [],
+    };
   }
 
-  const synced = await syncRazorpayPlansByCadence();
+  const synced = await syncRazorpayPlansByCadence({ force });
   const prices = [];
+  const planWarnings = [];
   let dashboardMatchCount = 0;
 
   for (const plan of PLAN_KEYS) {
+    const configuredId = envPlanId(plan);
     const fallbackPaise = planAmountPaise(plan, 1, pricePerStudentYearInr);
     const meta = planDisplayMeta(plan);
     const razorpayPlan = synced.get(plan) || null;
 
     if (razorpayPlan?.id) dashboardMatchCount += 1;
+
+    if (configuredId && razorpayPlan?.id !== configuredId) {
+      planWarnings.push({
+        plan,
+        configuredRazorpayPlanId: configuredId,
+        loadedRazorpayPlanId: razorpayPlan?.id || null,
+        message: razorpayPlan
+          ? `Loaded ${razorpayPlan.id} instead of configured ${configuredId}.`
+          : `Could not load ${configuredId} from Razorpay. Check RAZORPAY_KEY_ID/SECRET and that plan mode (test vs live) matches your plan IDs.`,
+      });
+    }
 
     const unitMinor =
       razorpayPlan?.item?.amount != null ? Number(razorpayPlan.item.amount) : fallbackPaise;
@@ -371,8 +432,15 @@ async function loadSubscriptionCatalogPrices(includedSeatCount, pricePerStudentY
       ? intervalLabelFromRazorpayPlan(razorpayPlan, plan)
       : meta.intervalLabel;
 
+    let planSource = "computed";
+    if (razorpayPlan) {
+      planSource = planSourceForCatalog(plan, razorpayPlan);
+    } else if (configuredId) {
+      planSource = "env_unavailable";
+    }
+
     prices.push({
-      id: razorpayPlan?.id || plan,
+      id: razorpayPlan?.id || configuredId || plan,
       plan,
       nickname: razorpayPlan?.item?.name || `School plan — ${plan}`,
       currency: "inr",
@@ -383,8 +451,8 @@ async function loadSubscriptionCatalogPrices(includedSeatCount, pricePerStudentY
       intervalLabel,
       totalForSchoolInr:
         includedSeatCount >= 1 ? (unitMinor * includedSeatCount) / 100 : null,
-      razorpayPlanId: razorpayPlan?.id || null,
-      planSource: planSourceForCatalog(plan, razorpayPlan),
+      razorpayPlanId: razorpayPlan?.id || configuredId || null,
+      planSource,
     });
   }
 
@@ -392,6 +460,7 @@ async function loadSubscriptionCatalogPrices(includedSeatCount, pricePerStudentY
     razorpayConfigured: true,
     plansSyncedFromDashboard: dashboardMatchCount > 0,
     dashboardPlansMatched: dashboardMatchCount,
+    planWarnings,
     product: {
       id: "utthan-school-subscription",
       name: "UtthanAI school subscription",
@@ -638,6 +707,7 @@ module.exports = {
   envPlanId,
   inferPlanKeyFromRazorpayPlan,
   syncRazorpayPlansByCadence,
+  invalidateRazorpayPlanCache,
   resolvePlanId,
   loadSubscriptionCatalogPrices,
   ensureRazorpayCustomer,
