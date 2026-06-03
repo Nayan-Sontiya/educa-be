@@ -9,6 +9,10 @@ const TeacherAssignment = require("../models/TeacherAssignment");
 const StudentPortfolio = require("../models/StudentPortfolio");
 const School = require("../models/School");
 const { sendSms } = require("../utils/smsService");
+const {
+  buildParentLoginSmsMessage,
+  PARENT_APP_PLAY_STORE_URL,
+} = require("../utils/parentCredentialsSms");
 const { sendMail } = require("../utils/mail");
 const { uploadBuffer } = require("../utils/cloudinary");
 const { analyzePortfolio, getWeekNumber } = require("../utils/aiAnalysis");
@@ -204,13 +208,14 @@ exports.addStudentToClass = async (req, res) => {
       const schoolAdminEmail = classSection.schoolId?.email || null;
       const cls = classSection.classId?.name || "";
       const sec = classSection.sectionId?.name ? ` - ${classSection.sectionId.name}` : "";
-      const smsMessage =
-        `UtthanAI Login\n` +
-        `School: ${schoolName}\n` +
-        `Student: ${studentName}${cls ? ` (${cls}${sec})` : ""}\n` +
-        `Username: ${parentUserUsername}\n` +
-        `Password: ${plainPassword}\n` +
-        `Download the UtthanAI Parent app to track your child's progress.`;
+      const classSectionLabel = cls ? `${cls}${sec}` : "";
+      const smsMessage = buildParentLoginSmsMessage({
+        schoolName,
+        studentName,
+        classSectionLabel,
+        username: parentUserUsername,
+        password: plainPassword,
+      });
 
       if (studentStatus === "pending") {
         // Credentials are held until the school pays and activates this student.
@@ -231,7 +236,8 @@ exports.addStudentToClass = async (req, res) => {
                 `Please share the following credentials with the parent manually:\n\n` +
                 `Student: ${studentName}${cls ? ` (${cls}${sec})` : ""}\n` +
                 `Username: ${parentUserUsername}\n` +
-                `Password: ${plainPassword}\n\n` +
+                `Password: ${plainPassword}\n` +
+                `App: ${PARENT_APP_PLAY_STORE_URL}\n\n` +
                 `School: ${schoolName}`,
               html:
                 `<p>The SMS with login credentials for <strong>${studentName}</strong> could not be delivered to <strong>${parentPhone}</strong>.</p>` +
