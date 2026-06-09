@@ -8,7 +8,7 @@ const Review = require("../models/Review");
 const bcrypt = require("bcryptjs");
 const udiseService = require("../utils/udiseService");
 const { createDefaultClasses } = require("../utils/createDefaultClasses");
-const { getRelativePath, getFileUrl, getFileUrls, convertDocumentsToUrls } = require("../utils/fileUrlHelper");
+const { getRelativePath, getFileUrl, getFileUrls, convertDocumentsToUrls, normalizeGalleryPath } = require("../utils/fileUrlHelper");
 const { normalizePhone } = require("../utils/phone");
 const { sendSms } = require("../utils/smsService");
 const {
@@ -873,8 +873,16 @@ exports.updateSchoolListing = async (req, res) => {
 exports.updateSchoolGallery = async (req, res) => {
   try {
     const { schoolId } = req.user;
-    const files = req.files || {};
-    const galleryFiles = files.gallery || [];
+    const galleryFiles = Array.isArray(req.files)
+      ? req.files
+      : req.files?.gallery || [];
+
+    if (galleryFiles.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No files uploaded",
+      });
+    }
 
     const school = await School.findById(schoolId);
 
@@ -947,15 +955,18 @@ exports.removeGalleryImage = async (req, res) => {
       });
     }
 
+    const normalizedPath = normalizeGalleryPath(imagePath);
     school.listing.gallery = school.listing.gallery.filter(
-      (path) => path !== imagePath
+      (path) => normalizeGalleryPath(path) !== normalizedPath
     );
 
     await school.save();
 
+    const galleryUrls = getFileUrls(school.listing.gallery, req);
+
     res.status(200).json({
       success: true,
-      data: school.listing.gallery,
+      data: galleryUrls,
       message: "Image removed successfully",
     });
   } catch (error) {

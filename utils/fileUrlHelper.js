@@ -92,9 +92,43 @@ const convertDocumentsToUrls = (documents, req = null) => {
   return converted;
 };
 
+/**
+ * Normalize a gallery image path for comparison/storage.
+ * Accepts full URLs or relative paths and returns a relative uploads/... path.
+ * @param {string} imagePath - Full URL or relative path
+ * @returns {string|null} Normalized relative path
+ */
+const normalizeGalleryPath = (imagePath) => {
+  if (!imagePath) return null;
+
+  let path = imagePath;
+
+  if (path.startsWith('http://') || path.startsWith('https://')) {
+    try {
+      path = new URL(path).pathname;
+    } catch {
+      // keep original path
+    }
+  }
+
+  if (path.startsWith('/')) {
+    path = path.slice(1);
+  }
+
+  path = path.replace(/\\/g, '/');
+
+  const uploadsIndex = path.toLowerCase().indexOf('uploads');
+  if (uploadsIndex !== -1) {
+    return path.substring(uploadsIndex);
+  }
+
+  return path;
+};
+
 module.exports = {
   getRelativePath,
   getFileUrl,
   getFileUrls,
   convertDocumentsToUrls,
+  normalizeGalleryPath,
 };
