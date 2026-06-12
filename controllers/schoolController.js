@@ -19,9 +19,21 @@ const {
   notifySchoolRegistered,
   notifySchoolStatusChanged,
 } = require("../utils/schoolEmailNotifications");
+const {
+  normalizeEmail,
+  findUserByEmailInsensitive,
+  cleanupIncompleteSchoolRegistration,
+  rollbackSchoolRegistration,
+  isCompleteSchoolRegistration,
+  formatMongooseValidationError,
+  formatDuplicateKeyError,
+} = require("../utils/schoolRegistrationCleanup");
 
 // Register school (public). Expects multipart/form-data for file uploads.
 exports.registerSchool = async (req, res) => {
+  let createdUserId = null;
+  let createdSchoolId = null;
+
   try {
     const body = req.body || {};
     const files = req.files || {};
@@ -46,51 +58,81 @@ exports.registerSchool = async (req, res) => {
       password,
     } = body;
 
+    const normEmail = normalizeEmail(adminEmail);
+    const normUdise = String(udiseCode || "").trim();
+
     // Basic required checks
     if (
       !name ||
-      !udiseCode ||
+      !normUdise ||
       !affiliationBoard ||
       !addressLine1 ||
       !city ||
       !pincode ||
       !adminName ||
-      !adminEmail ||
+      !normEmail ||
       !adminMobile ||
       !password
     ) {
       return res.status(400).json({ message: "Missing required fields" });
     }
 
-    // Duplicate checks
-    const existing = await School.findOne({
-      $or: [{ email: adminEmail }, { udiseCode }],
+    // Drop rows left behind when a previous signup failed mid-way.
+    await cleanupIncompleteSchoolRegistration(normEmail, normUdise);
+
+    const existingSchool = await School.findOne({
+      $or: [{ email: normEmail }, { udiseCode: normUdise }],
     });
-    if (existing)
-      return res
-        .status(400)
-        .json({ message: "This school or admin email is already registered." });
+    const existingUser = await findUserByEmailInsensitive(normEmail);
+
+    if (existingSchool) {
+      const linkedUser =
+        existingUser ||
+        (existingSchool.createdBy
+          ? await User.findById(existingSchool.createdBy)
+          : null);
+      if (isCompleteSchoolRegistration(linkedUser, existingSchool)) {
+        return res.status(400).json({
+          message: "This school or admin email is already registered.",
+        });
+      }
+      await cleanupIncompleteSchoolRegistration(normEmail, normUdise);
+    }
+
+    if (existingUser) {
+      if (existingUser.role !== "school_admin") {
+        return res.status(400).json({
+          message: "This email is already used by another account.",
+        });
+      }
+      const linkedSchool = existingUser.schoolId
+        ? await School.findById(existingUser.schoolId)
+        : null;
+      if (
+        linkedSchool &&
+        isCompleteSchoolRegistration(existingUser, linkedSchool)
+      ) {
+        return res.status(400).json({
+          message: "Admin email already registered. Please sign in instead.",
+        });
+      }
+      await cleanupIncompleteSchoolRegistration(normEmail, normUdise);
+    }
 
     // UDISE verification (stub)
-    const udiseResult = await udiseService.verifyUdise(udiseCode);
-
-    // Create user (school admin)
-    const userExists = await User.findOne({ email: adminEmail });
-    if (userExists)
-      return res
-        .status(400)
-        .json({ message: "Admin email already registered as user" });
+    const udiseResult = await udiseService.verifyUdise(normUdise);
 
     const hash = await bcrypt.hash(password, 10);
     const pn = normalizePhone(adminMobile);
     const user = await User.create({
       name: adminName,
-      email: adminEmail,
+      email: normEmail,
       password: hash,
       role: "school_admin",
       phone: adminMobile,
       ...(pn ? { phoneNormalized: pn } : {}),
     });
+    createdUserId = user._id;
 
     // Save file paths (if provided) - convert absolute paths to relative paths
     const documents = {};
@@ -107,12 +149,17 @@ exports.registerSchool = async (req, res) => {
       gallery.push(...files.gallery.map((file) => getRelativePath(file.path)));
     }
 
-    // create school
+    const trimmedAffiliationNumber = affiliationNumber
+      ? String(affiliationNumber).trim()
+      : "";
+
     const school = await School.create({
       name,
-      udiseCode,
+      udiseCode: normUdise,
       affiliationBoard,
-      affiliationNumber,
+      ...(trimmedAffiliationNumber
+        ? { affiliationNumber: trimmedAffiliationNumber }
+        : {}),
       yearEstablished,
       schoolType,
       schoolCategory,
@@ -124,28 +171,30 @@ exports.registerSchool = async (req, res) => {
       district: udiseResult?.district,
       state: udiseResult?.state,
       udiseVerified: !!udiseResult?.valid,
-      email: adminEmail,
+      email: normEmail,
       phone: adminMobile,
       authorizedPerson: {
         fullName: adminName,
         designation: adminDesignation,
-        officialEmail: adminEmail,
+        officialEmail: normEmail,
         mobile: adminMobile,
       },
       documents,
       listing: {
-        gallery: gallery, // Add gallery images to listing
+        gallery: gallery,
       },
       verificationStatus: "Pending",
       createdBy: user._id,
     });
+    createdSchoolId = school._id;
 
-    // link user -> school
     user.schoolId = school._id;
     await createDefaultClasses(school._id);
     await user.save();
 
-    // Convert file paths to full URLs for response
+    createdUserId = null;
+    createdSchoolId = null;
+
     const schoolResponse = {
       ...school.toObject(),
       documents: convertDocumentsToUrls(school.documents, req),
@@ -182,8 +231,20 @@ exports.registerSchool = async (req, res) => {
         console.error("[mail] school registration — exception:", err)
       );
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ message: "Error registering school" });
+    console.error("registerSchool error:", error);
+    await rollbackSchoolRegistration(createdUserId, createdSchoolId);
+
+    if (error.code === 11000) {
+      return res.status(409).json({ message: formatDuplicateKeyError(error) });
+    }
+    if (error.name === "ValidationError") {
+      return res.status(400).json({ message: formatMongooseValidationError(error) });
+    }
+
+    res.status(500).json({
+      message:
+        "Registration could not be completed. Your details were not saved — please review the form and try again.",
+    });
   }
 };
 

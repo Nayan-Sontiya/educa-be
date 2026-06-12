@@ -6,7 +6,8 @@ const schoolSchema = new mongoose.Schema(
     name: { type: String, required: true },
     udiseCode: { type: String, required: true, unique: true },
     affiliationBoard: { type: String, required: true },
-    affiliationNumber: { type: String, required: true },
+    /** Optional — not all boards issue a separate affiliation number */
+    affiliationNumber: { type: String },
     yearEstablished: { type: Number },
     schoolType: { type: String },
     schoolCategory: { type: String },
@@ -104,5 +105,15 @@ const schoolSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+schoolSchema.pre("validate", function (next) {
+  if (
+    this.affiliationNumber === "" ||
+    this.affiliationNumber === null
+  ) {
+    this.affiliationNumber = undefined;
+  }
+  next();
+});
 
 module.exports = mongoose.model("School", schoolSchema);

@@ -38,7 +38,29 @@ const storage = multer.diskStorage({
   },
 });
 
-const upload = multer({ storage });
+const GALLERY_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".gif"]);
+
+const galleryFileFilter = (req, file, cb) => {
+  if (file.fieldname !== "gallery") {
+    return cb(null, true);
+  }
+
+  const ext = path.extname(file.originalname).toLowerCase();
+  if (!GALLERY_EXTENSIONS.has(ext)) {
+    return cb(
+      new Error("Gallery only accepts JPG, PNG, WebP, or GIF images"),
+      false
+    );
+  }
+
+  cb(null, true);
+};
+
+const upload = multer({
+  storage,
+  fileFilter: galleryFileFilter,
+  limits: { fileSize: 5 * 1024 * 1024 },
+});
 
 // Public registration endpoint (handles file uploads)
 router.post(

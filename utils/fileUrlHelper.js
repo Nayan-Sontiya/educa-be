@@ -40,8 +40,11 @@ const getRelativePath = (absolutePath) => {
 const getFileUrl = (filePath, req = null) => {
   if (!filePath) return null;
   
-  // If already a full URL, return as is
+  // If already a full URL, normalize production host to HTTPS
   if (filePath.startsWith('http://') || filePath.startsWith('https://')) {
+    if (filePath.startsWith('http://api.utthanai.com')) {
+      return filePath.replace('http://', 'https://');
+    }
     return filePath;
   }
   
@@ -51,18 +54,30 @@ const getFileUrl = (filePath, req = null) => {
     relativePath = getRelativePath(filePath);
   }
   
-  // Get base URL from environment or request
+  // Get base URL from environment or request (respect HTTPS behind reverse proxy)
   let baseUrl;
   if (req) {
-    baseUrl = process.env.BASE_URL || `${req.protocol}://${req.get('host')}`;
+    const host = req.get('host');
+    let protocol = req.get('x-forwarded-proto') || req.protocol;
+    // Production API is always served over HTTPS
+    if (host && (host === 'api.utthanai.com' || host.endsWith('.utthanai.com'))) {
+      protocol = 'https';
+    }
+    baseUrl = process.env.BASE_URL || `${protocol}://${host}`;
   } else {
     baseUrl = process.env.BASE_URL || 'http://localhost:5000';
   }
-  
+
+  baseUrl = baseUrl.replace(/\/$/, '');
+
   // Remove leading slash if present in filePath to avoid double slashes
   const cleanPath = relativePath.startsWith('/') ? relativePath.slice(1) : relativePath;
-  
-  return `${baseUrl}/${cleanPath}`;
+
+  let url = `${baseUrl}/${cleanPath}`;
+  if (url.startsWith('http://api.utthanai.com')) {
+    url = url.replace('http://', 'https://');
+  }
+  return url;
 };
 
 /**
