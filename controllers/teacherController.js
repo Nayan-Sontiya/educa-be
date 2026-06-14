@@ -8,9 +8,61 @@ const { normalizePhone, pickPhoneFromBody } = require("../utils/phone");
 const {
   assertPhoneVerificationToken,
 } = require("./signupOtpController");
+const {
+  validateTeacherRegistrationAtSchool,
+} = require("../utils/teacherRegistration");
 
 function escapeRegex(str) {
   return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function resolveSubjectIds(schoolId, subjectIds, subject) {
+  let resolvedSubjectIds = Array.isArray(subjectIds) ? subjectIds : [];
+  if (
+    resolvedSubjectIds.length === 0 &&
+    subject != null &&
+    String(subject).trim() !== "" &&
+    schoolId
+  ) {
+    const subDoc = await Subject.findOne({
+      schoolId,
+      name: new RegExp(`^${escapeRegex(String(subject).trim())}$`, "i"),
+    })
+      .select("_id")
+      .lean();
+    if (subDoc) resolvedSubjectIds = [subDoc._id];
+  }
+  return resolvedSubjectIds;
+}
+
+function buildTeacherSignupResponse(user, teacher) {
+  const userResponse = {
+    id: user._id.toString(),
+    _id: user._id.toString(),
+    name: user.name,
+    email: user.email,
+    phone: user.phone,
+    role: user.role,
+    schoolId: user.schoolId,
+    createdAt: user.createdAt,
+    teacherStatus: teacher.status,
+  };
+
+  const body = {
+    message: "Teacher registered successfully, pending approval",
+    user: userResponse,
+    teacher,
+  };
+
+  if (teacher.status === "active") {
+    body.token = jwt.sign(
+      { id: user._id, role: user.role, schoolId: user.schoolId },
+      process.env.JWT_SECRET,
+      { expiresIn: "1d" }
+    );
+  }
+
+  return body;
 }
 
 // 🧾 1️⃣ Teacher self-register
@@ -44,52 +96,50 @@ exports.registerTeacher = async (req, res) => {
       });
     }
 
-    const existingUser = await User.findOne({ email: email.trim() });
-    if (existingUser)
-      return res.status(400).json({ message: "Email already registered" });
-
-    // Defence in depth: also reject if the phone is already in use by another
-    // user (the OTP send step checks this too, but a token could be reused
-    // up to 15 minutes after issuance).
-    const pn = normalizePhone(phoneRaw);
-    if (pn) {
-      const phoneTaken = await User.findOne({
-        $or: [{ phoneNormalized: pn }, { phone: pn }, { phone: phoneRaw }],
-      }).select("_id");
-      if (phoneTaken) {
-        return res
-          .status(400)
-          .json({ message: "Mobile number already registered" });
-      }
+    const validation = await validateTeacherRegistrationAtSchool(
+      schoolId,
+      email,
+      phoneRaw,
+    );
+    if (!validation.ok) {
+      return res.status(validation.status).json({ message: validation.message });
     }
 
-    const hash = await bcrypt.hash(password, 10);
-    const userPayload = {
-      name: name.trim(),
-      email: email.trim(),
-      password: hash,
-      role: "teacher",
+    const resolvedSubjectIds = await resolveSubjectIds(
       schoolId,
-      phone: phoneRaw,
-      ...(pn ? { phoneNormalized: pn } : {}),
-    };
+      subjectIds,
+      subject,
+    );
+    const pn = normalizePhone(phoneRaw);
+    const hash = await bcrypt.hash(password, 10);
 
-    const user = await User.create(userPayload);
+    let user;
 
-    let resolvedSubjectIds = Array.isArray(subjectIds) ? subjectIds : [];
-    if (
-      resolvedSubjectIds.length === 0 &&
-      subject != null &&
-      String(subject).trim() !== "" &&
-      schoolId
-    ) {
-      const subDoc = await Subject.findOne({
+    if (validation.mode === "link_user") {
+      user = await User.findById(validation.existingUser._id);
+      if (!user) {
+        return res.status(400).json({ message: "Account not found" });
+      }
+
+      const userUpdates = { password: hash };
+      if (phoneRaw && !user.phone) {
+        userUpdates.phone = phoneRaw;
+        if (pn) userUpdates.phoneNormalized = pn;
+      }
+      if (name?.trim()) userUpdates.name = name.trim();
+      await User.findByIdAndUpdate(user._id, userUpdates);
+      user = await User.findById(user._id);
+    } else {
+      const userPayload = {
+        name: name.trim(),
+        email: email.trim(),
+        password: hash,
+        role: "teacher",
         schoolId,
-        name: new RegExp(`^${escapeRegex(String(subject).trim())}$`, "i"),
-      })
-        .select("_id")
-        .lean();
-      if (subDoc) resolvedSubjectIds = [subDoc._id];
+        phone: phoneRaw,
+        ...(pn ? { phoneNormalized: pn } : {}),
+      };
+      user = await User.create(userPayload);
     }
 
     const teacher = await Teacher.create({
@@ -99,35 +149,7 @@ exports.registerTeacher = async (req, res) => {
       phone: phoneRaw,
     });
 
-    const userResponse = {
-      id: user._id.toString(),
-      _id: user._id.toString(),
-      name: user.name,
-      email: user.email,
-      phone: user.phone,
-      role: user.role,
-      schoolId: user.schoolId,
-      createdAt: user.createdAt,
-      teacherStatus: teacher.status,
-    };
-
-    const body = {
-      message: "Teacher registered successfully, pending approval",
-      user: userResponse,
-      teacher,
-    };
-
-    // Only active teachers may receive a session (e.g. added by school admin as active).
-    // Self-service signup is pending until an admin approves — no JWT.
-    if (teacher.status === "active") {
-      body.token = jwt.sign(
-        { id: user._id, role: user.role, schoolId: user.schoolId },
-        process.env.JWT_SECRET,
-        { expiresIn: "1d" }
-      );
-    }
-
-    res.status(201).json(body);
+    res.status(201).json(buildTeacherSignupResponse(user, teacher));
   } catch (error) {
     console.error("registerTeacher:", error?.message || error);
     if (error?.name === "ValidationError") {
@@ -141,6 +163,13 @@ exports.registerTeacher = async (req, res) => {
       return res.status(400).json({ message: "Invalid school or reference id" });
     }
     if (error?.code === 11000) {
+      const keyPattern = error.keyPattern || {};
+      if (keyPattern.userId && keyPattern.schoolId) {
+        return res.status(400).json({
+          message:
+            "This email or mobile number is already registered as a teacher at this school.",
+        });
+      }
       return res.status(400).json({ message: "Email or username already registered" });
     }
     res.status(500).json({
@@ -159,11 +188,16 @@ exports.addTeacherBySchoolAdmin = async (req, res) => {
     if (!name || !email)
       return res.status(400).json({ message: "Name and email are required" });
 
-    const existingUser = await User.findOne({ email: email.trim() });
-    if (existingUser)
-      return res.status(400).json({ message: "Email already exists" });
-
     const schoolId = req.user.schoolId;
+
+    const validation = await validateTeacherRegistrationAtSchool(
+      schoolId,
+      email,
+      phoneRaw,
+    );
+    if (!validation.ok) {
+      return res.status(validation.status).json({ message: validation.message });
+    }
 
     const providedPassword =
       typeof password === "string" && password.trim().length >= 6
@@ -175,20 +209,39 @@ exports.addTeacherBySchoolAdmin = async (req, res) => {
     const plainPassword = providedPassword || generatedPassword;
     const hash = await bcrypt.hash(plainPassword, 10);
 
-    const userPayload = {
-      name: name.trim(),
-      email: email.trim(),
-      password: hash,
-      role: "teacher",
-      schoolId,
-    };
-    if (phoneRaw) {
-      userPayload.phone = phoneRaw;
-      const pn = normalizePhone(phoneRaw);
-      if (pn) userPayload.phoneNormalized = pn;
-    }
+    let user;
 
-    const user = await User.create(userPayload);
+    if (validation.mode === "link_user") {
+      user = await User.findById(validation.existingUser._id);
+      if (!user) {
+        return res.status(400).json({ message: "Account not found" });
+      }
+      if (providedPassword) {
+        await User.findByIdAndUpdate(user._id, { password: hash });
+      }
+      const pn = normalizePhone(phoneRaw);
+      if (phoneRaw && !user.phone) {
+        await User.findByIdAndUpdate(user._id, {
+          phone: phoneRaw,
+          ...(pn ? { phoneNormalized: pn } : {}),
+        });
+      }
+      user = await User.findById(user._id);
+    } else {
+      const userPayload = {
+        name: name.trim(),
+        email: email.trim(),
+        password: hash,
+        role: "teacher",
+        schoolId,
+      };
+      if (phoneRaw) {
+        userPayload.phone = phoneRaw;
+        const pn = normalizePhone(phoneRaw);
+        if (pn) userPayload.phoneNormalized = pn;
+      }
+      user = await User.create(userPayload);
+    }
 
     const teacher = await Teacher.create({
       userId: user._id,

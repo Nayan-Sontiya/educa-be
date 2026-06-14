@@ -16,6 +16,14 @@ const {
   assertPhoneVerificationToken,
   DEFAULT_TTL,
 } = require("../utils/phoneVerificationJwt");
+const {
+  isPhoneBlockedForTeacherSignup,
+} = require("../utils/teacherRegistration");
+
+function isTeacherSignupPurpose(body) {
+  const purpose = String(body?.purpose || "").trim().toLowerCase();
+  return purpose === "teacher" && body?.schoolId;
+}
 
 /** POST /api/auth/signup/send-otp — check phone is free; client sends OTP via Firebase */
 exports.sendSignupOtp = async (req, res) => {
@@ -27,20 +35,30 @@ exports.sendSignupOtp = async (req, res) => {
       return res.status(400).json({ message: "Enter a valid 10-digit mobile number" });
     }
 
-    const existingUser = await User.findOne({
-      $or: [
-        { phoneNormalized: mobileNormalized },
-        { phone: mobileNormalized },
-      ],
-    })
-      .select("_id")
-      .lean();
+    if (isTeacherSignupPurpose(req.body)) {
+      const blocked = await isPhoneBlockedForTeacherSignup(
+        req.body.schoolId,
+        mobileNormalized,
+      );
+      if (blocked.blocked) {
+        return res.status(409).json({ message: blocked.message });
+      }
+    } else {
+      const existingUser = await User.findOne({
+        $or: [
+          { phoneNormalized: mobileNormalized },
+          { phone: mobileNormalized },
+        ],
+      })
+        .select("_id")
+        .lean();
 
-    if (existingUser) {
-      return res.status(409).json({
-        message:
-          "This mobile number is already registered. Please log in or use a different number.",
-      });
+      if (existingUser) {
+        return res.status(409).json({
+          message:
+            "This mobile number is already registered. Please log in or use a different number.",
+        });
+      }
     }
 
     return res.json({
@@ -66,20 +84,30 @@ exports.verifySignupOtp = async (req, res) => {
       return res.status(result.status).json({ message: result.message });
     }
 
-    const existingUser = await User.findOne({
-      $or: [
-        { phoneNormalized: result.mobileNormalized },
-        { phone: result.mobileNormalized },
-      ],
-    })
-      .select("_id")
-      .lean();
+    if (isTeacherSignupPurpose(req.body)) {
+      const blocked = await isPhoneBlockedForTeacherSignup(
+        req.body.schoolId,
+        result.mobileNormalized,
+      );
+      if (blocked.blocked) {
+        return res.status(409).json({ message: blocked.message });
+      }
+    } else {
+      const existingUser = await User.findOne({
+        $or: [
+          { phoneNormalized: result.mobileNormalized },
+          { phone: result.mobileNormalized },
+        ],
+      })
+        .select("_id")
+        .lean();
 
-    if (existingUser) {
-      return res.status(409).json({
-        message:
-          "This mobile number is already registered. Please log in or use a different number.",
-      });
+      if (existingUser) {
+        return res.status(409).json({
+          message:
+            "This mobile number is already registered. Please log in or use a different number.",
+        });
+      }
     }
 
     const phoneVerificationToken = issuePhoneVerificationToken(
