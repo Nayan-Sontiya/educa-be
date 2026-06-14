@@ -10,11 +10,15 @@ const udiseService = require("../utils/udiseService");
 const { createDefaultClasses } = require("../utils/createDefaultClasses");
 const { getRelativePath, getFileUrl, getFileUrls, convertDocumentsToUrls, normalizeGalleryPath } = require("../utils/fileUrlHelper");
 const { normalizePhone } = require("../utils/phone");
-const { sendSms } = require("../utils/smsService");
 const {
-  createAndSendOtp: createMobileOtp,
-  consumeOtp: consumeMobileOtp,
+  normalize10,
+  maskPhone,
 } = require("../utils/mobileOtpService");
+const { verifyFirebasePhoneIdToken } = require("../utils/firebasePhoneVerification");
+const {
+  issuePhoneVerificationToken,
+  assertPhoneVerificationToken,
+} = require("../utils/phoneVerificationJwt");
 const {
   notifySchoolRegistered,
   notifySchoolStatusChanged,
@@ -56,6 +60,7 @@ exports.registerSchool = async (req, res) => {
       adminEmail,
       adminMobile,
       password,
+      phoneVerificationToken,
     } = body;
 
     const normEmail = normalizeEmail(adminEmail);
@@ -72,9 +77,18 @@ exports.registerSchool = async (req, res) => {
       !adminName ||
       !normEmail ||
       !adminMobile ||
-      !password
+      !password ||
+      !phoneVerificationToken
     ) {
       return res.status(400).json({ message: "Missing required fields" });
+    }
+
+    const phoneCheck = assertPhoneVerificationToken(
+      phoneVerificationToken,
+      adminMobile,
+    );
+    if (!phoneCheck.ok) {
+      return res.status(400).json({ message: phoneCheck.message });
     }
 
     // Drop rows left behind when a previous signup failed mid-way.
@@ -596,61 +610,51 @@ exports.getSchoolsWithReviews = async (req, res) => {
   }
 };
 
-const SCHOOL_REG_OTP_TTL_MS = 10 * 60 * 1000;
-const SCHOOL_REG_OTP_MAX_ATTEMPTS = 5;
-const SCHOOL_REG_OTP_PURPOSE = "school_registration";
-
-/** POST /schools/send-otp — stores OTP server-side, sends SMS; never returns the code to the client */
+/** POST /schools/send-otp — phone check only; OTP is sent by Firebase on the client */
 exports.sendOtp = async (req, res) => {
   try {
     const { mobile } = req.body || {};
+    const mobileNormalized = normalize10(mobile || "");
 
-    const result = await createMobileOtp({
-      phone: mobile,
-      purpose: SCHOOL_REG_OTP_PURPOSE,
-      ttlMs: SCHOOL_REG_OTP_TTL_MS,
-      smsTemplate: (code) =>
-        `Your UtthanAI school registration verification code is ${code}. Valid for 10 minutes. Do not share this code.`,
-    });
-
-    if (!result.ok) {
-      return res.status(result.status).json({ message: result.message });
+    if (!mobileNormalized) {
+      return res.status(400).json({ message: "Enter a valid 10-digit mobile number" });
     }
 
     return res.json({
-      message:
-        "If this number can receive SMS, a verification code has been sent. It may take up to a minute to arrive.",
+      message: `You can receive a verification code on ${maskPhone(mobileNormalized)}.`,
+      provider: "firebase",
     });
   } catch (err) {
     console.error("sendOtp:", err);
     return res
       .status(500)
-      .json({ message: "Could not send verification code. Try again later." });
+      .json({ message: "Could not start phone verification. Try again later." });
   }
 };
 
-/** POST /schools/verify-otp — checks stored OTP, rate-limited attempts */
+/** POST /schools/verify-otp — verify Firebase ID token; returns phoneVerificationToken */
 exports.verifyOtp = async (req, res) => {
   try {
-    const { mobile, otp } = req.body || {};
+    const { mobile, firebaseIdToken } = req.body || {};
 
-    const result = await consumeMobileOtp({
-      phone: mobile,
-      otp,
-      purpose: SCHOOL_REG_OTP_PURPOSE,
-      maxAttempts: SCHOOL_REG_OTP_MAX_ATTEMPTS,
-    });
-
+    const result = await verifyFirebasePhoneIdToken(firebaseIdToken, mobile);
     if (!result.ok) {
       return res.status(result.status).json({ message: result.message });
     }
 
-    return res.json({ message: "Mobile verified successfully" });
+    const phoneVerificationToken = issuePhoneVerificationToken(
+      result.mobileNormalized,
+    );
+
+    return res.json({
+      message: "Mobile verified successfully",
+      phoneVerificationToken,
+    });
   } catch (err) {
     console.error("verifyOtp:", err);
     return res
       .status(500)
-      .json({ message: "Could not verify code. Try again." });
+      .json({ message: "Could not verify phone. Try again." });
   }
 };
 

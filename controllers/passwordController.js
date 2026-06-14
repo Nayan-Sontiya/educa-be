@@ -4,12 +4,11 @@ const User = require("../models/User");
 const { normalizePhone } = require("../utils/phone");
 const { normalizeUsername } = require("../utils/username");
 const {
-  assignOtpToUser,
   verifyOtpOnUser,
   clearOtp,
 } = require("../services/userOtpService");
-const { sendSms } = require("../utils/smsService");
 const { sendMail } = require("../utils/mail");
+const { verifyFirebasePhoneIdToken } = require("../utils/firebasePhoneVerification");
 
 const OTP_TTL_MS = 5 * 60 * 1000;
 const MAX_RESEND = 3;
@@ -129,28 +128,29 @@ exports.forgotPasswordSendOtp = async (req, res) => {
       existing.expiresAt &&
       now <= new Date(existing.expiresAt);
 
-    const resendCount = stillValidForgot ? Number(existing.resendCount || 0) + 1 : 1;
-    if (resendCount > MAX_RESEND) {
-      return res.status(429).json({
-        message: "Maximum resend attempts reached. Please try again after OTP expiry.",
-      });
-    }
-
-    const code = generateCode();
-    user.authOtp = {
-      code,
-      expiresAt: new Date(Date.now() + OTP_TTL_MS),
-      attempts: 3,
-      resendCount,
-      purpose: "forgot",
-    };
-    await user.save();
-
     const body = { ...GENERIC_SEND_OTP };
 
     if (via === "email") {
+      const resendCount = stillValidForgot ? Number(existing.resendCount || 0) + 1 : 1;
+      if (resendCount > MAX_RESEND) {
+        return res.status(429).json({
+          message: "Maximum resend attempts reached. Please try again after OTP expiry.",
+        });
+      }
+
+      const code = generateCode();
+      user.authOtp = {
+        code,
+        expiresAt: new Date(Date.now() + OTP_TTL_MS),
+        attempts: 3,
+        resendCount,
+        purpose: "forgot",
+      };
+      await user.save();
+
       const maskedEmail = user.email.replace(/(.{2}).+(@.+)/, "$1***$2");
       body.maskedEmail = maskedEmail;
+      body.via = "email";
       body.message = `OTP sent to ${maskedEmail}`;
 
       sendMail({
@@ -216,19 +216,8 @@ exports.forgotPasswordSendOtp = async (req, res) => {
       }).catch((err) => console.error("forgot OTP email send error:", err.message));
     } else {
       body.maskedMobile = maskPhone(user.phone);
-      body.message = `OTP sent to ${body.maskedMobile}`;
-
-      const smsText = `UtthanAI OTP: ${code}. Valid 5 mins. Do not share.`;
-      sendSms(pn, smsText).catch((err) =>
-        console.error("forgot OTP SMS send error:", err.message)
-      );
-    }
-
-    // In dev, expose OTP in response only for SMS (phone may not be reachable).
-    // For email, the real email is sent — no need to leak the code.
-    if (process.env.NODE_ENV !== "production" && via === "sms") {
-      body.code = code;
-      body.message = "OTP sent (dev SMS). Use code to verify.";
+      body.via = "firebase_phone";
+      body.message = `Verify with the SMS code sent to ${body.maskedMobile}.`;
     }
 
     res.json(body);
@@ -243,26 +232,40 @@ exports.forgotPasswordVerifyOtp = async (req, res) => {
   try {
     // Accept `identifier` (new) or fall back to legacy `username`
     const identifier = req.body.identifier || req.body.username;
-    const { otp } = req.body;
-    if (!identifier || !otp) {
-      return res.status(400).json({ message: "Identifier and OTP are required" });
-    }
-    if (!/^[0-9]{6}$/.test(String(otp).trim())) {
-      return res.status(400).json({ message: "OTP must be 6 digits" });
+    const { otp, firebaseIdToken } = req.body;
+    if (!identifier) {
+      return res.status(400).json({ message: "Identifier is required" });
     }
 
-    const { user } = await resolveUserFromIdentifier(identifier);
+    const { user, via } = await resolveUserFromIdentifier(identifier);
     if (!user) {
-      return res.status(400).json({ message: "Invalid or expired OTP" });
+      return res.status(400).json({ message: "Invalid or expired verification" });
     }
 
-    const result = await verifyOtpOnUser(user, otp, "forgot");
-    if (!result.ok) {
-      return res.status(400).json({ message: result.message });
+    if (via === "email") {
+      if (!otp) {
+        return res.status(400).json({ message: "OTP is required" });
+      }
+      if (!/^[0-9]{6}$/.test(String(otp).trim())) {
+        return res.status(400).json({ message: "OTP must be 6 digits" });
+      }
+      const result = await verifyOtpOnUser(user, otp, "forgot");
+      if (!result.ok) {
+        return res.status(400).json({ message: result.message });
+      }
+      clearOtp(user);
+      await user.save();
+    } else {
+      if (!firebaseIdToken) {
+        return res.status(400).json({ message: "Phone verification token is required" });
+      }
+      const pn = normalizePhone(user.phone);
+      const tail10 = pn && pn.length >= 10 ? pn.slice(-10) : pn;
+      const fb = await verifyFirebasePhoneIdToken(firebaseIdToken, tail10);
+      if (!fb.ok) {
+        return res.status(fb.status).json({ message: fb.message });
+      }
     }
-
-    clearOtp(user);
-    await user.save();
 
     const resetToken = jwt.sign(
       { uid: user._id.toString(), typ: "pwd_reset" },

@@ -7,6 +7,12 @@ const { normalizePhone } = require("../utils/phone");
 const { normalizeUsername } = require("../utils/username");
 const { resolveSchoolIdForUser } = require("../utils/resolveSchoolId");
 const { getSchoolBillingAccess } = require("../utils/subscriptionAccess");
+const { sendMail } = require("../utils/mail");
+const { maskPhone } = require("../utils/mobileOtpService");
+const {
+  normalize10,
+  verifyFirebasePhoneIdToken,
+} = require("../utils/firebasePhoneVerification");
 
 const ROLE_ENUM = ["admin", "teacher", "counselor", "school_admin", "parent", "student"];
 
@@ -121,13 +127,16 @@ exports.updateCurrentUser = async (req, res) => {
 
     if (phone !== undefined) {
       const nextPhone = String(phone || "").trim();
-      const currentNormalized = normalizePhone(current.phone || "");
-      const nextNormalized = normalizePhone(nextPhone);
+      const currentNormalized = normalize10(current.phone || "");
+      const nextNormalized = normalize10(nextPhone);
       const isPhoneChanged = (currentNormalized || "") !== (nextNormalized || "");
 
       if (isPhoneChanged) {
         const pending = current.pendingContactChange?.phone;
-        if (!pending?.verified || pending?.normalized !== nextNormalized) {
+        if (
+          !pending?.verified ||
+          normalize10(pending?.normalized || pending?.value || "") !== nextNormalized
+        ) {
           return res.status(400).json({
             message:
               "Phone change requires OTP verification. Request and verify OTP first.",
@@ -222,31 +231,60 @@ exports.requestContactChangeOtp = async (req, res) => {
         expiresAt,
         verified: false,
       };
-      if (dev) response.emailOtp = code;
+
+      const mailResult = await sendMail({
+        to: nextEmail,
+        subject: "Verify your new email — UtthanAI",
+        text:
+          `Your UtthanAI profile email change OTP is: ${code}\n\n` +
+          `Valid for ${Math.round(CONTACT_OTP_TTL_MS / 60000)} minutes. Do not share this code.\n\n` +
+          `If you did not request this, ignore this email.`,
+        html: `<p>Your UtthanAI profile email change OTP is:</p><p style="font-size:24px;font-weight:bold;letter-spacing:4px">${code}</p><p>Valid for ${Math.round(CONTACT_OTP_TTL_MS / 60000)} minutes.</p>`,
+        logContext: "contact_change_email",
+      });
+
+      if (dev && (!mailResult?.ok || mailResult?.skipped)) {
+        response.emailOtp = code;
+      }
+      response.message =
+        response.message === "OTP sent for requested contact changes"
+          ? `OTP sent to ${nextEmail.replace(/(.{2}).+(@.+)/, "$1***$2")}.`
+          : `${response.message} Email OTP sent.`;
     }
 
     if (phone !== undefined) {
       const nextPhone = String(phone || "").trim();
-      const nextNormalized = normalizePhone(nextPhone);
-      if (!nextPhone || !nextNormalized || nextNormalized.length < 8) {
-        return res.status(400).json({ message: "Please provide a valid mobile number" });
+      const nextNormalized = normalize10(nextPhone);
+      if (!nextPhone || !nextNormalized) {
+        return res.status(400).json({ message: "Please provide a valid 10-digit mobile number" });
       }
       const exists = await User.findOne({
-        phoneNormalized: nextNormalized,
+        $or: [
+          { phoneNormalized: nextNormalized },
+          { phone: nextNormalized },
+        ],
         _id: { $ne: user._id },
       });
       if (exists) {
         return res.status(409).json({ message: "Mobile number already in use" });
       }
-      const code = generateCode();
       user.pendingContactChange.phone = {
         value: nextPhone,
         normalized: nextNormalized,
-        code,
         expiresAt,
         verified: false,
       };
-      if (dev) response.phoneOtp = code;
+      response.phoneProvider = "firebase";
+      response.maskedMobile = maskPhone(nextNormalized);
+      response.message =
+        response.message === "OTP sent for requested contact changes"
+          ? `Next: send SMS code to ${maskPhone(nextNormalized)} (Firebase on this page).`
+          : `${response.message} Then verify mobile via SMS to ${maskPhone(nextNormalized)}.`;
+      console.info("[contact-change] phone pending for Firebase SMS", {
+        userId: String(user._id),
+        maskedMobile: maskPhone(nextNormalized),
+        expiresAt,
+      });
     }
 
     await user.save();
@@ -259,10 +297,10 @@ exports.requestContactChangeOtp = async (req, res) => {
 
 exports.verifyContactChangeOtp = async (req, res) => {
   try {
-    const { emailOtp, phoneOtp } = req.body;
-    if (!emailOtp && !phoneOtp) {
+    const { emailOtp, phoneOtp, firebaseIdToken } = req.body;
+    if (!emailOtp && !phoneOtp && !firebaseIdToken) {
       return res.status(400).json({
-        message: "Provide at least one OTP: emailOtp or phoneOtp",
+        message: "Provide emailOtp and/or firebaseIdToken for mobile verification",
       });
     }
 
@@ -279,7 +317,32 @@ exports.verifyContactChangeOtp = async (req, res) => {
       pending.email.verified = true;
       pending.email.code = undefined;
     }
-    if (phoneOtp) {
+    if (firebaseIdToken) {
+      const phonePending = pending.phone;
+      if (!phonePending?.normalized || !phonePending?.expiresAt) {
+        return res.status(400).json({
+          message: "No pending mobile change. Request OTP first.",
+        });
+      }
+      if (new Date() > new Date(phonePending.expiresAt)) {
+        return res.status(400).json({ message: "Mobile verification expired. Request again." });
+      }
+      const result = await verifyFirebasePhoneIdToken(
+        firebaseIdToken,
+        phonePending.normalized,
+      );
+      console.info("[contact-change] Firebase phone verify", {
+        userId: String(user._id),
+        maskedMobile: maskPhone(phonePending.normalized),
+        ok: result.ok,
+        status: result.ok ? undefined : result.status,
+      });
+      if (!result.ok) {
+        return res.status(result.status).json({ message: result.message });
+      }
+      pending.phone.verified = true;
+      pending.phone.code = undefined;
+    } else if (phoneOtp) {
       if (!isOtpValid(pending.phone, phoneOtp)) {
         return res.status(400).json({ message: "Invalid or expired mobile OTP" });
       }

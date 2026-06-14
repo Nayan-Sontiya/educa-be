@@ -59,9 +59,15 @@ const studentSchema = new mongoose.Schema(
       ref: "User",
       required: true,
     },
-    /** Temporarily holds the SMS text (phone + message) to be sent once the school activates this pending student via payment. Cleared after send. */
+    /** Held until pending student is activated via payment; cleared after DLT SMS send. */
     pendingCredentialsSms: {
       phone: { type: String, default: null },
+      schoolName: { type: String, default: null },
+      studentName: { type: String, default: null },
+      classSectionLabel: { type: String, default: null },
+      username: { type: String, default: null },
+      password: { type: String, default: null },
+      /** @deprecated legacy plain-text; cannot be sent via DLT */
       message: { type: String, default: null },
     },
   },

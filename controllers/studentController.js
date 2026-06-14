@@ -8,7 +8,7 @@ const Teacher = require("../models/Teacher");
 const TeacherAssignment = require("../models/TeacherAssignment");
 const StudentPortfolio = require("../models/StudentPortfolio");
 const School = require("../models/School");
-const { sendSms } = require("../utils/smsService");
+const { sendParentCredentialsSms } = require("../utils/smsService");
 const {
   buildParentLoginSmsMessage,
   PARENT_APP_PLAY_STORE_URL,
@@ -209,23 +209,33 @@ exports.addStudentToClass = async (req, res) => {
       const cls = classSection.classId?.name || "";
       const sec = classSection.sectionId?.name ? ` - ${classSection.sectionId.name}` : "";
       const classSectionLabel = cls ? `${cls}${sec}` : "";
-      const smsMessage = buildParentLoginSmsMessage({
+      const credentialPayload = {
         schoolName,
         studentName,
         classSectionLabel,
         username: parentUserUsername,
         password: plainPassword,
-      });
+      };
+      const smsMessage = buildParentLoginSmsMessage(credentialPayload);
 
       if (studentStatus === "pending") {
         // Credentials are held until the school pays and activates this student.
         await Student.updateOne(
           { _id: student._id },
-          { $set: { "pendingCredentialsSms.phone": parentPhone, "pendingCredentialsSms.message": smsMessage } }
+          {
+            $set: {
+              "pendingCredentialsSms.phone": parentPhone,
+              "pendingCredentialsSms.schoolName": schoolName,
+              "pendingCredentialsSms.studentName": studentName,
+              "pendingCredentialsSms.classSectionLabel": classSectionLabel,
+              "pendingCredentialsSms.username": parentUserUsername,
+              "pendingCredentialsSms.password": plainPassword,
+            },
+          },
         );
       } else {
         // Student is immediately active — send now.
-        sendSms(parentPhone, smsMessage).catch((smsErr) => {
+        sendParentCredentialsSms(parentPhone, credentialPayload).catch((smsErr) => {
           console.error("Failed to send SMS credentials:", smsErr.message);
           if (schoolAdminEmail) {
             sendMail({

@@ -17,7 +17,7 @@ const {
   countIncludedSeatStudents,
 } = require("../utils/studentSeatBilling");
 const { sendMail } = require("../utils/mail");
-const { sendSms } = require("../utils/smsService");
+const { sendParentCredentialsSms } = require("../utils/smsService");
 const {
   PLAN_KEYS,
   razorpayKeyId,
@@ -767,7 +767,17 @@ async function handlePendingStudentsPaymentCaptured(payment) {
 
   const pendingStudents = await Student.find(
     { schoolId, status: "pending" },
-    { _id: 1, name: 1, "pendingCredentialsSms.phone": 1, "pendingCredentialsSms.message": 1 }
+    {
+      _id: 1,
+      name: 1,
+      "pendingCredentialsSms.phone": 1,
+      "pendingCredentialsSms.schoolName": 1,
+      "pendingCredentialsSms.studentName": 1,
+      "pendingCredentialsSms.classSectionLabel": 1,
+      "pendingCredentialsSms.username": 1,
+      "pendingCredentialsSms.password": 1,
+      "pendingCredentialsSms.message": 1,
+    }
   ).lean();
 
   const result = await Student.updateMany(
@@ -781,11 +791,27 @@ async function handlePendingStudentsPaymentCaptured(payment) {
   if (result.modifiedCount === 0) return;
 
   for (const s of pendingStudents) {
-    const phone = s.pendingCredentialsSms?.phone;
-    const message = s.pendingCredentialsSms?.message;
-    if (phone && message) {
-      sendSms(phone, message).catch((err) =>
-        console.error(`Failed to send activation SMS for student ${s._id}:`, err.message)
+    const pending = s.pendingCredentialsSms || {};
+    const phone = pending.phone;
+    const username = pending.username;
+    const password = pending.password;
+
+    if (phone && username && password) {
+      sendParentCredentialsSms(phone, {
+        schoolName: pending.schoolName || "Your School",
+        studentName: pending.studentName || s.name || "Student",
+        classSectionLabel: pending.classSectionLabel || "",
+        username,
+        password,
+      }).catch((err) =>
+        console.error(
+          `Failed to send activation SMS for student ${s._id}:`,
+          err?.message || err,
+        ),
+      );
+    } else if (phone && pending.message) {
+      console.warn(
+        `[sms] Student ${s._id} has legacy pendingCredentialsSms.message only — cannot send via DLT. Share credentials manually.`,
       );
     }
   }
