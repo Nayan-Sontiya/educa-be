@@ -88,8 +88,8 @@ async function verifyFirebasePhoneIdToken(firebaseIdToken, expectedPhone) {
     console.error("verifyFirebasePhoneIdToken:", err?.message || err);
     return {
       ok: false,
-      status: 401,
-      message: "Phone verification expired or invalid. Please verify again.",
+      status: 400,
+      message: "Invalid or expired verification code. Please try again.",
     };
   }
 }
