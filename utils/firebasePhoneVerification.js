@@ -1,4 +1,4 @@
-const { getFirebaseAdmin, isFirebaseAdminConfigured } = require("./firebaseAdmin");
+const { getFirebaseAuth, isFirebaseAdminConfigured } = require("./firebaseAdmin");
 const { normalizePhone } = require("./phone");
 
 /** Last 10 digits of an Indian mobile number. */
@@ -48,19 +48,48 @@ async function verifyFirebasePhoneIdToken(firebaseIdToken, expectedPhone) {
     };
   }
 
+  let auth;
   try {
-    const admin = getFirebaseAdmin();
-    const decoded = await admin.auth().verifyIdToken(firebaseIdToken);
+    auth = getFirebaseAuth();
+  } catch (initErr) {
+    console.error("[firebase-phone] Admin init failed", initErr?.message || initErr);
+    return {
+      ok: false,
+      status: 503,
+      message:
+        "Phone verification is unavailable (server Firebase Admin misconfigured).",
+    };
+  }
+
+  try {
+    const decoded = await auth.verifyIdToken(firebaseIdToken, false);
+
+    const configProject = process.env.FIREBASE_PROJECT_ID;
+    if (configProject && decoded.aud && decoded.aud !== configProject) {
+      console.error("[firebase-phone] project mismatch", {
+        tokenAud: decoded.aud,
+        configProject,
+      });
+      return {
+        ok: false,
+        status: 503,
+        message:
+          "Phone verification server misconfigured (Firebase project mismatch).",
+      };
+    }
 
     const tokenPhone = phoneFromFirebaseE164(decoded.phone_number);
     if (!tokenPhone) {
-      console.warn("[firebase-phone] ID token has no phone_number claim", {
+      console.warn("[firebase-phone] ID token missing phone_number claim", {
         uid: decoded.uid,
+        aud: decoded.aud,
+        signInProvider: decoded.firebase?.sign_in_provider,
       });
       return {
         ok: false,
         status: 400,
-        message: "Phone number was not verified by Firebase.",
+        message:
+          "Phone number was not verified by Firebase. Request OTP and try again.",
       };
     }
 
@@ -74,7 +103,7 @@ async function verifyFirebasePhoneIdToken(firebaseIdToken, expectedPhone) {
         ok: false,
         status: 400,
         message:
-          "Mobile number does not match the verified Firebase session. Please try again.",
+          "This code was sent to a different number. Request OTP again for the number in the form.",
       };
     }
 
@@ -85,11 +114,33 @@ async function verifyFirebasePhoneIdToken(firebaseIdToken, expectedPhone) {
 
     return { ok: true, mobileNormalized: tokenPhone, uid: decoded.uid };
   } catch (err) {
-    console.error("verifyFirebasePhoneIdToken:", err?.message || err);
+    const code = err?.code || err?.errorInfo?.code;
+    console.error("[firebase-phone] verifyIdToken failed", {
+      code,
+      message: err?.message,
+      expected: `******${expected.slice(-4)}`,
+    });
+
+    if (code === "auth/id-token-expired") {
+      return {
+        ok: false,
+        status: 400,
+        message: "Verification expired. Request OTP again.",
+      };
+    }
+
+    if (code === "auth/invalid-id-token" || code === "auth/argument-error") {
+      return {
+        ok: false,
+        status: 400,
+        message: "Could not verify SMS code. Request OTP and try again.",
+      };
+    }
+
     return {
       ok: false,
       status: 400,
-      message: "Invalid or expired verification code. Please try again.",
+      message: "Could not verify SMS code. Request OTP and try again.",
     };
   }
 }
