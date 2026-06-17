@@ -13,9 +13,7 @@ const userSchema = new mongoose.Schema(
       required: function () {
         return this.role !== "parent" && this.role !== "student";
       },
-      unique: true,
-      sparse: true, // Allows multiple null/undefined values
-      default: undefined, // Don't set to null, leave undefined if not provided
+      default: undefined,
       validate: {
         validator: function (value) {
           // If email is provided, it must be a valid email format
@@ -31,8 +29,6 @@ const userSchema = new mongoose.Schema(
     // Username: globally unique when present (sparse index — not scoped by school)
     username: {
       type: String,
-      unique: true,
-      sparse: true, // Allows multiple null/undefined values
       required: function () {
         return this.role === "parent" || this.role === "student";
       },
@@ -126,6 +122,9 @@ userSchema.pre('save', function (next) {
   if (this.isModified("phone")) {
     const n = normalizePhone(this.phone);
     this.phoneNormalized = n || undefined;
+  }
+  if (this.email && typeof this.email === "string") {
+    this.email = this.email.trim().toLowerCase();
   }
   next();
 });

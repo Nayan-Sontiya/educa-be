@@ -13,6 +13,12 @@ const { normalizePhone } = require("../utils/phone");
 const { normalizeUsername } = require("../utils/username");
 const Teacher = require("../models/Teacher");
 const { assertParentCanAuthenticate } = require("../utils/pendingStudentAccess");
+const {
+  assertEmailAvailable,
+  findUserByEmail,
+  normalizeEmail,
+  EMAIL_IN_USE_MESSAGE,
+} = require("../utils/emailUniqueness");
 
 exports.registerUser = async (req, res) => {
   try {
@@ -42,9 +48,9 @@ exports.registerUser = async (req, res) => {
 
     // Check if user already exists by email (if email provided)
     if (email) {
-      const existsByEmail = await User.findOne({ email });
-      if (existsByEmail) {
-        return res.status(409).json({ message: "A user with this email already exists" });
+      const emailCheck = await assertEmailAvailable(email);
+      if (!emailCheck.ok) {
+        return res.status(emailCheck.status).json({ message: emailCheck.message });
       }
     }
 
@@ -67,7 +73,7 @@ exports.registerUser = async (req, res) => {
     };
 
     // Add email if provided (required for non-parent/student)
-    if (email) userData.email = email;
+    if (email) userData.email = normalizeEmail(email);
     
     if (normalizedUsername) userData.username = normalizedUsername;
 
@@ -118,9 +124,7 @@ exports.registerUser = async (req, res) => {
       const keyValue = error.keyValue || {};
       
       if (keyPattern.email && keyValue.email) {
-        return res.status(409).json({ 
-          message: `Email "${keyValue.email}" is already registered. Please use a different email.` 
-        });
+        return res.status(409).json({ message: EMAIL_IN_USE_MESSAGE });
       }
       
       if (keyPattern.username && keyValue.username) {
@@ -160,7 +164,7 @@ exports.loginUser = async (req, res) => {
 
     let user;
     if (email.includes("@")) {
-      user = await User.findOne({ email });
+      user = await findUserByEmail(email);
     } else {
       const un = normalizeUsername(email);
       user = un ? await User.findOne({ username: un }) : null;

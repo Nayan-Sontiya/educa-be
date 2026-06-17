@@ -9,6 +9,7 @@ const {
 } = require("../services/userOtpService");
 const { sendMail } = require("../utils/mail");
 const { verifyFirebasePhoneIdToken } = require("../utils/firebasePhoneVerification");
+const { findUserByEmail } = require("../utils/emailUniqueness");
 
 const OTP_TTL_MS = 5 * 60 * 1000;
 const MAX_RESEND = 3;
@@ -79,15 +80,6 @@ async function findUserByUsername(username) {
   return User.findOne({ username: uname });
 }
 
-async function findUserByEmail(email) {
-  if (!email) return null;
-  return User.findOne({ email: email.trim().toLowerCase() });
-}
-
-/**
- * Resolve user from an identifier that is either an email address or a username.
- * Returns { user, via } where via is 'email' or 'sms'.
- */
 async function resolveUserFromIdentifier(identifier) {
   const raw = String(identifier || "").trim();
   if (!raw) return { user: null, via: null };

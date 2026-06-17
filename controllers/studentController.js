@@ -17,6 +17,7 @@ const { sendMail } = require("../utils/mail");
 const { uploadBuffer } = require("../utils/cloudinary");
 const { analyzePortfolio, getWeekNumber } = require("../utils/aiAnalysis");
 const { normalizeUsername, suggestAvailableUsernames } = require("../utils/username");
+const { EMAIL_IN_USE_MESSAGE } = require("../utils/emailUniqueness");
 const {
   resolvePortfolioForStudent,
   portfolioEntryCount,
@@ -322,7 +323,7 @@ exports.addStudentToClass = async (req, res) => {
       // Handle email duplicate (for non-null emails)
       if (keyPattern.email && keyValue.email) {
         return res.status(409).json({
-          message: `Email "${keyValue.email}" is already registered. Please use a different email.`,
+          message: EMAIL_IN_USE_MESSAGE,
         });
       }
       

@@ -2,21 +2,18 @@ const School = require("../models/School");
 const User = require("../models/User");
 const Class = require("../models/Class");
 const ClassSection = require("../models/ClassSection");
-
-function normalizeEmail(email) {
-  return String(email || "").trim().toLowerCase();
-}
+const {
+  normalizeEmail,
+  findUserByEmail,
+  EMAIL_IN_USE_MESSAGE,
+} = require("./emailUniqueness");
 
 function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 async function findUserByEmailInsensitive(email) {
-  const norm = normalizeEmail(email);
-  if (!norm) return null;
-  return User.findOne({
-    email: { $regex: new RegExp(`^${escapeRegex(norm)}$`, "i") },
-  });
+  return findUserByEmail(email);
 }
 
 async function deleteSchoolArtifacts(schoolId) {
@@ -115,7 +112,7 @@ function formatDuplicateKeyError(error) {
   const keyValue = error.keyValue || {};
 
   if (keyPattern.email) {
-    return `Email "${keyValue.email}" is already registered. If you did not finish signup earlier, try again now or contact support.`;
+    return EMAIL_IN_USE_MESSAGE;
   }
   if (keyPattern.udiseCode) {
     return `UDISE code "${keyValue.udiseCode}" is already registered.`;

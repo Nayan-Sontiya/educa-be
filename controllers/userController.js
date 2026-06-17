@@ -13,6 +13,11 @@ const {
   normalize10,
   verifyFirebasePhoneIdToken,
 } = require("../utils/firebasePhoneVerification");
+const {
+  assertEmailAvailable,
+  EMAIL_IN_USE_MESSAGE,
+  isValidEmailFormat,
+} = require("../utils/emailUniqueness");
 
 const ROLE_ENUM = ["admin", "teacher", "counselor", "school_admin", "parent", "student"];
 
@@ -35,7 +40,7 @@ function generateCode() {
 }
 
 function validateEmail(email) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email || "").trim());
+  return isValidEmailFormat(email);
 }
 
 function isOtpValid(block, otp) {
@@ -220,9 +225,11 @@ exports.requestContactChangeOtp = async (req, res) => {
       if (!nextEmail || !validateEmail(nextEmail)) {
         return res.status(400).json({ message: "Please provide a valid email" });
       }
-      const exists = await User.findOne({ email: nextEmail, _id: { $ne: user._id } });
-      if (exists) {
-        return res.status(409).json({ message: "Email already in use" });
+      const emailCheck = await assertEmailAvailable(nextEmail, {
+        excludeUserId: user._id,
+      });
+      if (!emailCheck.ok) {
+        return res.status(emailCheck.status).json({ message: emailCheck.message });
       }
       const code = generateCode();
       user.pendingContactChange.email = {
@@ -562,12 +569,14 @@ exports.adminPatchUser = async (req, res) => {
     }
 
     if (patch.email) {
-      const taken = await User.findOne({
-        email: patch.email,
-        _id: { $ne: target._id },
+      const emailCheck = await assertEmailAvailable(patch.email, {
+        excludeUserId: target._id,
       });
-      if (taken) {
-        return res.status(409).json({ success: false, message: "Email already in use" });
+      if (!emailCheck.ok) {
+        return res.status(emailCheck.status).json({
+          success: false,
+          message: emailCheck.message,
+        });
       }
     }
     if (patch.username) {
@@ -606,6 +615,13 @@ exports.adminPatchUser = async (req, res) => {
       });
     }
     if (error.code === 11000) {
+      const keyPattern = error.keyPattern || {};
+      if (keyPattern.email) {
+        return res.status(409).json({
+          success: false,
+          message: EMAIL_IN_USE_MESSAGE,
+        });
+      }
       return res.status(409).json({
         success: false,
         message: "Duplicate email or username",

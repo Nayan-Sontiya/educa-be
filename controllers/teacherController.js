@@ -8,9 +8,8 @@ const { normalizePhone, pickPhoneFromBody } = require("../utils/phone");
 const {
   assertPhoneVerificationToken,
 } = require("./signupOtpController");
-const {
-  validateTeacherRegistrationAtSchool,
-} = require("../utils/teacherRegistration");
+const { EMAIL_IN_USE_MESSAGE, assertEmailAvailable, normalizeEmail } = require("../utils/emailUniqueness");
+const { validateTeacherRegistrationAtSchool } = require("../utils/teacherRegistration");
 
 function escapeRegex(str) {
   return String(str).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -112,34 +111,15 @@ exports.registerTeacher = async (req, res) => {
     const pn = normalizePhone(phoneRaw);
     const hash = await bcrypt.hash(password, 10);
 
-    let user;
-
-    if (validation.mode === "link_user") {
-      user = await User.findById(validation.existingUser._id);
-      if (!user) {
-        return res.status(400).json({ message: "Account not found" });
-      }
-
-      const userUpdates = { password: hash };
-      if (phoneRaw && !user.phone) {
-        userUpdates.phone = phoneRaw;
-        if (pn) userUpdates.phoneNormalized = pn;
-      }
-      if (name?.trim()) userUpdates.name = name.trim();
-      await User.findByIdAndUpdate(user._id, userUpdates);
-      user = await User.findById(user._id);
-    } else {
-      const userPayload = {
-        name: name.trim(),
-        email: email.trim(),
-        password: hash,
-        role: "teacher",
-        schoolId,
-        phone: phoneRaw,
-        ...(pn ? { phoneNormalized: pn } : {}),
-      };
-      user = await User.create(userPayload);
-    }
+    const user = await User.create({
+      name: name.trim(),
+      email: validation.normalizedEmail,
+      password: hash,
+      role: "teacher",
+      schoolId,
+      phone: phoneRaw,
+      ...(pn ? { phoneNormalized: pn } : {}),
+    });
 
     const teacher = await Teacher.create({
       userId: user._id,
@@ -163,10 +143,12 @@ exports.registerTeacher = async (req, res) => {
     }
     if (error?.code === 11000) {
       const keyPattern = error.keyPattern || {};
+      if (keyPattern.email) {
+        return res.status(409).json({ message: EMAIL_IN_USE_MESSAGE });
+      }
       if (keyPattern.userId && keyPattern.schoolId) {
         return res.status(400).json({
-          message:
-            "This email is already registered as a teacher at this school.",
+          message: "This teacher is already registered at this school.",
         });
       }
       return res.status(400).json({ message: "Email or username already registered" });
@@ -207,39 +189,20 @@ exports.addTeacherBySchoolAdmin = async (req, res) => {
     const plainPassword = providedPassword || generatedPassword;
     const hash = await bcrypt.hash(plainPassword, 10);
 
-    let user;
-
-    if (validation.mode === "link_user") {
-      user = await User.findById(validation.existingUser._id);
-      if (!user) {
-        return res.status(400).json({ message: "Account not found" });
-      }
-      if (providedPassword) {
-        await User.findByIdAndUpdate(user._id, { password: hash });
-      }
+    const userPayload = {
+      name: name.trim(),
+      email: validation.normalizedEmail,
+      password: hash,
+      role: "teacher",
+      schoolId,
+    };
+    if (phoneRaw) {
+      userPayload.phone = phoneRaw;
       const pn = normalizePhone(phoneRaw);
-      if (phoneRaw && !user.phone) {
-        await User.findByIdAndUpdate(user._id, {
-          phone: phoneRaw,
-          ...(pn ? { phoneNormalized: pn } : {}),
-        });
-      }
-      user = await User.findById(user._id);
-    } else {
-      const userPayload = {
-        name: name.trim(),
-        email: email.trim(),
-        password: hash,
-        role: "teacher",
-        schoolId,
-      };
-      if (phoneRaw) {
-        userPayload.phone = phoneRaw;
-        const pn = normalizePhone(phoneRaw);
-        if (pn) userPayload.phoneNormalized = pn;
-      }
-      user = await User.create(userPayload);
+      if (pn) userPayload.phoneNormalized = pn;
     }
+
+    const user = await User.create(userPayload);
 
     const teacher = await Teacher.create({
       userId: user._id,
@@ -261,6 +224,9 @@ exports.addTeacherBySchoolAdmin = async (req, res) => {
     res.status(201).json(response);
   } catch (error) {
     console.error("Add Teacher Error:", error);
+    if (error?.code === 11000 && error?.keyPattern?.email) {
+      return res.status(409).json({ message: EMAIL_IN_USE_MESSAGE });
+    }
     res.status(500).json({ message: "Error adding teacher" });
   }
 };
@@ -281,9 +247,11 @@ exports.updateTeacher = async (req, res) => {
 
     // Step 2: Email conflict check (if email updated)
     if (email && email !== teacher.userId.email) {
-      const existingEmail = await User.findOne({ email });
-      if (existingEmail) {
-        return res.status(400).json({ message: "Email already in use" });
+      const emailCheck = await assertEmailAvailable(email, {
+        excludeUserId: userId,
+      });
+      if (!emailCheck.ok) {
+        return res.status(emailCheck.status).json({ message: emailCheck.message });
       }
     }
 
@@ -291,7 +259,7 @@ exports.updateTeacher = async (req, res) => {
     const userUpdates = {};
     const teacherUpdates = {};
     if (name) userUpdates.name = name;
-    if (email) userUpdates.email = email;
+    if (email) userUpdates.email = normalizeEmail(email);
     if (password) {
       const hash = await bcrypt.hash(password, 10);
       userUpdates.password = hash; // 🔐 Hash password if provided

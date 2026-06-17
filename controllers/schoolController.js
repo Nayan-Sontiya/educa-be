@@ -32,6 +32,7 @@ const {
   formatMongooseValidationError,
   formatDuplicateKeyError,
 } = require("../utils/schoolRegistrationCleanup");
+const { EMAIL_IN_USE_MESSAGE } = require("../utils/emailUniqueness");
 
 // Register school (public). Expects multipart/form-data for file uploads.
 exports.registerSchool = async (req, res) => {
@@ -115,8 +116,8 @@ exports.registerSchool = async (req, res) => {
 
     if (existingUser) {
       if (existingUser.role !== "school_admin") {
-        return res.status(400).json({
-          message: "This email is already used by another account.",
+        return res.status(409).json({
+          message: EMAIL_IN_USE_MESSAGE,
         });
       }
       const linkedSchool = existingUser.schoolId
@@ -126,8 +127,8 @@ exports.registerSchool = async (req, res) => {
         linkedSchool &&
         isCompleteSchoolRegistration(existingUser, linkedSchool)
       ) {
-        return res.status(400).json({
-          message: "Admin email already registered. Please sign in instead.",
+        return res.status(409).json({
+          message: EMAIL_IN_USE_MESSAGE,
         });
       }
       await cleanupIncompleteSchoolRegistration(normEmail, normUdise);
