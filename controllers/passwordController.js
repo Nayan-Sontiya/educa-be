@@ -209,7 +209,9 @@ exports.forgotPasswordSendOtp = async (req, res) => {
     } else {
       body.maskedMobile = maskPhone(user.phone);
       body.via = "firebase_phone";
-      body.message = `Verify with the SMS code sent to ${body.maskedMobile}.`;
+      const tail10 = pn && pn.length >= 10 ? pn.slice(-10) : pn;
+      if (tail10) body.phoneNormalized = tail10;
+      body.message = `SMS code will be sent to ${body.maskedMobile}.`;
     }
 
     res.json(body);
