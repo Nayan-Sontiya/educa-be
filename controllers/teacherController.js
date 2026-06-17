@@ -99,7 +99,6 @@ exports.registerTeacher = async (req, res) => {
     const validation = await validateTeacherRegistrationAtSchool(
       schoolId,
       email,
-      phoneRaw,
     );
     if (!validation.ok) {
       return res.status(validation.status).json({ message: validation.message });
@@ -167,7 +166,7 @@ exports.registerTeacher = async (req, res) => {
       if (keyPattern.userId && keyPattern.schoolId) {
         return res.status(400).json({
           message:
-            "This email or mobile number is already registered as a teacher at this school.",
+            "This email is already registered as a teacher at this school.",
         });
       }
       return res.status(400).json({ message: "Email or username already registered" });
@@ -193,7 +192,6 @@ exports.addTeacherBySchoolAdmin = async (req, res) => {
     const validation = await validateTeacherRegistrationAtSchool(
       schoolId,
       email,
-      phoneRaw,
     );
     if (!validation.ok) {
       return res.status(validation.status).json({ message: validation.message });

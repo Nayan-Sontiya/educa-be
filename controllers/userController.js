@@ -258,16 +258,6 @@ exports.requestContactChangeOtp = async (req, res) => {
       if (!nextPhone || !nextNormalized) {
         return res.status(400).json({ message: "Please provide a valid 10-digit mobile number" });
       }
-      const exists = await User.findOne({
-        $or: [
-          { phoneNormalized: nextNormalized },
-          { phone: nextNormalized },
-        ],
-        _id: { $ne: user._id },
-      });
-      if (exists) {
-        return res.status(409).json({ message: "Mobile number already in use" });
-      }
       user.pendingContactChange.phone = {
         value: nextPhone,
         normalized: nextNormalized,

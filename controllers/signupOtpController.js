@@ -2,10 +2,9 @@
  * Signup phone verification via Firebase Phone Auth (client sends SMS; server verifies ID token).
  *
  * Endpoints:
- *   POST /api/auth/signup/send-otp     — phone availability check (no SMS from backend)
+ *   POST /api/auth/signup/send-otp     — phone format check (no SMS from backend)
  *   POST /api/auth/signup/verify-otp   — body: { phone, firebaseIdToken }
  */
-const User = require("../models/User");
 const {
   normalize10,
   maskPhone,
@@ -16,16 +15,8 @@ const {
   assertPhoneVerificationToken,
   DEFAULT_TTL,
 } = require("../utils/phoneVerificationJwt");
-const {
-  isPhoneBlockedForTeacherSignup,
-} = require("../utils/teacherRegistration");
 
-function isTeacherSignupPurpose(body) {
-  const purpose = String(body?.purpose || "").trim().toLowerCase();
-  return purpose === "teacher" && body?.schoolId;
-}
-
-/** POST /api/auth/signup/send-otp — check phone is free; client sends OTP via Firebase */
+/** POST /api/auth/signup/send-otp — validate phone; client sends OTP via Firebase */
 exports.sendSignupOtp = async (req, res) => {
   try {
     const { phone } = req.body || {};
@@ -33,32 +24,6 @@ exports.sendSignupOtp = async (req, res) => {
 
     if (!mobileNormalized) {
       return res.status(400).json({ message: "Enter a valid 10-digit mobile number" });
-    }
-
-    if (isTeacherSignupPurpose(req.body)) {
-      const blocked = await isPhoneBlockedForTeacherSignup(
-        req.body.schoolId,
-        mobileNormalized,
-      );
-      if (blocked.blocked) {
-        return res.status(409).json({ message: blocked.message });
-      }
-    } else {
-      const existingUser = await User.findOne({
-        $or: [
-          { phoneNormalized: mobileNormalized },
-          { phone: mobileNormalized },
-        ],
-      })
-        .select("_id")
-        .lean();
-
-      if (existingUser) {
-        return res.status(409).json({
-          message:
-            "This mobile number is already registered. Please log in or use a different number.",
-        });
-      }
     }
 
     return res.json({
@@ -82,32 +47,6 @@ exports.verifySignupOtp = async (req, res) => {
     const result = await verifyFirebasePhoneIdToken(firebaseIdToken, phone);
     if (!result.ok) {
       return res.status(result.status).json({ message: result.message });
-    }
-
-    if (isTeacherSignupPurpose(req.body)) {
-      const blocked = await isPhoneBlockedForTeacherSignup(
-        req.body.schoolId,
-        result.mobileNormalized,
-      );
-      if (blocked.blocked) {
-        return res.status(409).json({ message: blocked.message });
-      }
-    } else {
-      const existingUser = await User.findOne({
-        $or: [
-          { phoneNormalized: result.mobileNormalized },
-          { phone: result.mobileNormalized },
-        ],
-      })
-        .select("_id")
-        .lean();
-
-      if (existingUser) {
-        return res.status(409).json({
-          message:
-            "This mobile number is already registered. Please log in or use a different number.",
-        });
-      }
     }
 
     const phoneVerificationToken = issuePhoneVerificationToken(
