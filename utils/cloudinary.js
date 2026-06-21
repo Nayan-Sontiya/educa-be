@@ -32,7 +32,45 @@ const uploadBuffer = (buffer, options = {}) => {
 /**
  * Delete a file from Cloudinary by public_id.
  */
-const deleteFile = (publicId) =>
-  cloudinary.uploader.destroy(publicId, { resource_type: "image" });
+const deleteFile = (publicId, resourceType = "image") =>
+  cloudinary.uploader.destroy(publicId, { resource_type: resourceType });
 
-module.exports = { cloudinary, uploadBuffer, deleteFile };
+/** Build a HTTPS URL for a stored Cloudinary public_id. */
+const buildCloudinaryUrl = (publicId, resourceType = "auto") =>
+  cloudinary.url(publicId, { secure: true, resource_type: resourceType });
+
+/** Extract public_id from a Cloudinary delivery URL. */
+const extractPublicIdFromUrl = (url) => {
+  if (!url || typeof url !== "string") return null;
+  try {
+    const parsed = new URL(url);
+    if (!parsed.hostname.includes("cloudinary.com")) return null;
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    const uploadIdx = parts.indexOf("upload");
+    if (uploadIdx === -1) return null;
+    let i = uploadIdx + 1;
+    // Skip version segment (v1234567890)
+    if (parts[i] && /^v\d+$/.test(parts[i])) i += 1;
+    const publicIdParts = parts.slice(i);
+    if (!publicIdParts.length) return null;
+    const last = publicIdParts[publicIdParts.length - 1];
+    const dot = last.lastIndexOf(".");
+    if (dot > 0) {
+      publicIdParts[publicIdParts.length - 1] = last.slice(0, dot);
+    }
+    return publicIdParts.join("/");
+  } catch {
+    return null;
+  }
+};
+
+const CLOUDINARY_PREFIX = "cloudinary:";
+
+module.exports = {
+  cloudinary,
+  uploadBuffer,
+  deleteFile,
+  buildCloudinaryUrl,
+  extractPublicIdFromUrl,
+  CLOUDINARY_PREFIX,
+};

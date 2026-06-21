@@ -60,6 +60,7 @@ app.use("/api/student-leaves", require("./routes/studentLeaveRoutes"));
 app.use("/api/teacher-attendance", require("./routes/teacherAttendanceRoutes"));
 app.use("/api/subscription", require("./routes/subscriptionRoutes"));
 app.use("/api/blogs", require("./routes/blogRoutes"));
+app.use("/api/platform-news", require("./routes/platformNewsRoutes"));
 app.use("/api/contacts", require("./routes/contactRoutes"));
 
 // Cron jobs

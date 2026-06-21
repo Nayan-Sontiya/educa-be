@@ -40,12 +40,17 @@ const getRelativePath = (absolutePath) => {
 const getFileUrl = (filePath, req = null) => {
   if (!filePath) return null;
   
-  // If already a full URL, normalize production host to HTTPS
+  // Full URLs: strip to relative uploads/... for DB; resolve again via BASE_URL on read.
   if (filePath.startsWith('http://') || filePath.startsWith('https://')) {
-    if (filePath.startsWith('http://api.utthanai.com')) {
-      return filePath.replace('http://', 'https://');
+    const relative = normalizeGalleryPath(filePath);
+    if (relative && relative.startsWith('uploads/')) {
+      filePath = relative;
+    } else {
+      if (filePath.startsWith('http://api.utthanai.com')) {
+        return filePath.replace('http://', 'https://');
+      }
+      return filePath;
     }
-    return filePath;
   }
   
   // Convert absolute paths to relative first
@@ -54,18 +59,19 @@ const getFileUrl = (filePath, req = null) => {
     relativePath = getRelativePath(filePath);
   }
   
-  // Get base URL from environment or request (respect HTTPS behind reverse proxy)
-  let baseUrl;
-  if (req) {
-    const host = req.get('host');
-    let protocol = req.get('x-forwarded-proto') || req.protocol;
-    // Production API is always served over HTTPS
-    if (host && (host === 'api.utthanai.com' || host.endsWith('.utthanai.com'))) {
-      protocol = 'https';
+  // Prefer BASE_URL from env so file URLs are not tied to the incoming request host.
+  let baseUrl = process.env.BASE_URL;
+  if (!baseUrl) {
+    if (req) {
+      const host = req.get('host');
+      let protocol = req.get('x-forwarded-proto') || req.protocol;
+      if (host && (host === 'api.utthanai.com' || host.endsWith('.utthanai.com'))) {
+        protocol = 'https';
+      }
+      baseUrl = `${protocol}://${host}`;
+    } else {
+      baseUrl = 'http://localhost:5000';
     }
-    baseUrl = process.env.BASE_URL || `${protocol}://${host}`;
-  } else {
-    baseUrl = process.env.BASE_URL || 'http://localhost:5000';
   }
 
   baseUrl = baseUrl.replace(/\/$/, '');
