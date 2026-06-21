@@ -35,8 +35,8 @@ const uploadBuffer = (buffer, options = {}) => {
 const deleteFile = (publicId, resourceType = "image") =>
   cloudinary.uploader.destroy(publicId, { resource_type: resourceType });
 
-/** Build a HTTPS URL for a stored Cloudinary public_id. */
-const buildCloudinaryUrl = (publicId, resourceType = "auto") =>
+/** Build a HTTPS URL for a stored Cloudinary public_id. Use image or video — not auto (breaks delivery). */
+const buildCloudinaryUrl = (publicId, resourceType = "image") =>
   cloudinary.url(publicId, { secure: true, resource_type: resourceType });
 
 /** Extract public_id from a Cloudinary delivery URL. */

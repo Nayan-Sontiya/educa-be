@@ -34,14 +34,15 @@ function normalizeStoredMediaPath(input) {
   return "";
 }
 
-function resolveMediaUrlForResponse(storedPath, req = null) {
+function resolveMediaUrlForResponse(storedPath, req = null, mediaType = "image") {
   if (!storedPath) return "";
   const stored = normalizeStoredMediaPath(storedPath) || String(storedPath).trim();
   if (!stored) return "";
 
   if (stored.startsWith(CLOUDINARY_PREFIX)) {
     const publicId = stored.slice(CLOUDINARY_PREFIX.length);
-    return buildCloudinaryUrl(publicId, "auto") || "";
+    const resourceType = mediaType === "video" ? "video" : "image";
+    return buildCloudinaryUrl(publicId, resourceType) || "";
   }
 
   if (stored.startsWith("uploads/")) {

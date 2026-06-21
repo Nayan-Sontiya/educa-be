@@ -61,7 +61,7 @@ function toPublicDoc(doc, req = null) {
     caption: o.caption,
     mediaType: o.mediaType || "none",
     mediaPath,
-    mediaUrl: resolveMediaUrlForResponse(o.mediaUrl, req),
+    mediaUrl: resolveMediaUrlForResponse(o.mediaUrl, req, o.mediaType),
     authorName: o.authorName || "UtthanAI",
     publishedAt: o.publishedAt,
     createdAt: o.createdAt,
@@ -293,9 +293,10 @@ exports.uploadMedia = async (req, res) => {
     }
 
     const mediaType = resolveMediaType(req.file.mimetype, req.file.originalname);
+    const resourceType = mediaType === "video" ? "video" : "image";
     const result = await uploadBuffer(req.file.buffer, {
       folder: "educa/platform-news",
-      resource_type: "auto",
+      resource_type: resourceType,
       original_filename: req.file.originalname,
     });
 
