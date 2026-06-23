@@ -17,7 +17,6 @@ const {
   countIncludedSeatStudents,
 } = require("../utils/studentSeatBilling");
 const { sendMail } = require("../utils/mail");
-const { sendParentCredentialsSms } = require("../utils/smsService");
 const {
   PLAN_KEYS,
   razorpayKeyId,
@@ -229,7 +228,7 @@ exports.createCheckoutSession = async (req, res) => {
     if (!subDoc) {
       subDoc = new SchoolSubscription({
         schoolId: school._id,
-        plan,
+      plan,
         billingMode: "per_seat",
         billedStudentCount: includedSeats,
         pricePerStudentYearInr: billing.pricePerStudentYearInr,
@@ -258,7 +257,7 @@ exports.createCheckoutSession = async (req, res) => {
     const order = await createSchoolPlanOrder({
       amountPaise,
       schoolId: school._id,
-      plan,
+        plan,
       mongoSubscriptionId: subDoc._id,
       seatCount: includedSeats,
     });
@@ -790,6 +789,7 @@ async function handlePendingStudentsPaymentCaptured(payment) {
 
   if (result.modifiedCount === 0) return;
 
+  const credentialLines = [];
   for (const s of pendingStudents) {
     const pending = s.pendingCredentialsSms || {};
     const phone = pending.phone;
@@ -797,25 +797,47 @@ async function handlePendingStudentsPaymentCaptured(payment) {
     const password = pending.password;
 
     if (phone && username && password) {
-      sendParentCredentialsSms(phone, {
-        schoolName: pending.schoolName || "Your School",
-        studentName: pending.studentName || s.name || "Student",
-        classSectionLabel: pending.classSectionLabel || "",
-        username,
-        password,
-      }).catch((err) =>
-        console.error(
-          `Failed to send activation SMS for student ${s._id}:`,
-          err?.message || err,
-        ),
+      credentialLines.push(
+        [
+          `Student: ${pending.studentName || s.name || "Student"}`,
+          pending.classSectionLabel ? `Class: ${pending.classSectionLabel}` : null,
+          `Parent phone: ${phone}`,
+          `Username: ${username}`,
+          `Password: ${password}`,
+        ]
+          .filter(Boolean)
+          .join("\n"),
       );
     } else if (phone && pending.message) {
       console.warn(
-        `[sms] Student ${s._id} has legacy pendingCredentialsSms.message only — cannot send via DLT. Share credentials manually.`,
+        `[sms] Student ${s._id} has legacy pendingCredentialsSms.message only; share credentials manually.`,
       );
     }
   }
 
+  if (credentialLines.length) {
+    const school = await School.findById(schoolId).select("name email").lean();
+    const schoolAdmin = await User.findOne({ schoolId, role: "school_admin" })
+      .select("email")
+      .lean();
+    const to = school?.email || schoolAdmin?.email;
+
+    if (to) {
+      await sendMail({
+        to,
+        subject: "Pending students activated - share parent login details",
+        text:
+          `The following pending students are now active for ${school?.name || "your school"}.\n\n` +
+          "Server-side SMS delivery has been removed. Please share these login details with the parent phone numbers below:\n\n" +
+          credentialLines.join("\n\n---\n\n"),
+        logContext: "pending_students_parent_credentials",
+      });
+    } else {
+      console.warn(
+        "[sms] Pending student credentials prepared, but no school email/admin email is available",
+      );
+    }
+  }
   const includedSeatCount = await countIncludedSeatStudents(schoolIdRaw);
   await SchoolSubscription.updateOne(
     { schoolId: schoolIdRaw },

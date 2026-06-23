@@ -59,7 +59,7 @@ const studentSchema = new mongoose.Schema(
       ref: "User",
       required: true,
     },
-    /** Held until pending student is activated via payment; cleared after DLT SMS send. */
+    /** Held until pending student is activated via payment; cleared after credentials are shared. */
     pendingCredentialsSms: {
       phone: { type: String, default: null },
       schoolName: { type: String, default: null },
@@ -67,7 +67,7 @@ const studentSchema = new mongoose.Schema(
       classSectionLabel: { type: String, default: null },
       username: { type: String, default: null },
       password: { type: String, default: null },
-      /** @deprecated legacy plain-text; cannot be sent via DLT */
+      /** @deprecated legacy plain-text credential message */
       message: { type: String, default: null },
     },
   },
@@ -82,4 +82,3 @@ studentSchema.index(
 studentSchema.index({ parentUserId: 1, status: 1 });
 
 module.exports = mongoose.model("Student", studentSchema);
-

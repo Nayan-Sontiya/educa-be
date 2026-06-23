@@ -11,9 +11,7 @@ const School = require("../models/School");
 const { sendParentCredentialsSms } = require("../utils/smsService");
 const {
   buildParentLoginSmsMessage,
-  PARENT_APP_PLAY_STORE_URL,
 } = require("../utils/parentCredentialsSms");
-const { sendMail } = require("../utils/mail");
 const { uploadBuffer } = require("../utils/cloudinary");
 const { analyzePortfolio, getWeekNumber } = require("../utils/aiAnalysis");
 const { normalizeUsername, suggestAvailableUsernames } = require("../utils/username");
@@ -105,6 +103,7 @@ exports.addStudentToClass = async (req, res) => {
       parentUsername,
       parentPassword,
     } = req.body;
+    let parentCredentialSms = null;
 
     const parentUserUsername = normalizeUsername(parentUsername);
     if (!classSectionId || !studentName || !parentPassword || !parentUserUsername) {
@@ -235,36 +234,15 @@ exports.addStudentToClass = async (req, res) => {
           },
         );
       } else {
-        // Student is immediately active — send now.
-        sendParentCredentialsSms(parentPhone, credentialPayload).catch((smsErr) => {
-          console.error("Failed to send SMS credentials:", smsErr.message);
-          if (schoolAdminEmail) {
-            sendMail({
-              to: schoolAdminEmail,
-              subject: `SMS delivery failed — share credentials for ${studentName}`,
-              text:
-                `The SMS with login credentials for ${studentName} could not be delivered to ${parentPhone}.\n\n` +
-                `Please share the following credentials with the parent manually:\n\n` +
-                `Student: ${studentName}${cls ? ` (${cls}${sec})` : ""}\n` +
-                `Username: ${parentUserUsername}\n` +
-                `Password: ${plainPassword}\n` +
-                `App: ${PARENT_APP_PLAY_STORE_URL}\n\n` +
-                `School: ${schoolName}`,
-              html:
-                `<p>The SMS with login credentials for <strong>${studentName}</strong> could not be delivered to <strong>${parentPhone}</strong>.</p>` +
-                `<p>Please share the following credentials with the parent manually:</p>` +
-                `<table style="border-collapse:collapse;font-family:monospace;font-size:14px;">` +
-                `<tr><td style="padding:4px 12px 4px 0;color:#555;">Student</td><td><strong>${studentName}${cls ? ` (${cls}${sec})` : ""}</strong></td></tr>` +
-                `<tr><td style="padding:4px 12px 4px 0;color:#555;">Username</td><td><strong>${parentUserUsername}</strong></td></tr>` +
-                `<tr><td style="padding:4px 12px 4px 0;color:#555;">Password</td><td><strong>${plainPassword}</strong></td></tr>` +
-                `<tr><td style="padding:4px 12px 4px 0;color:#555;">Phone</td><td>${parentPhone}</td></tr>` +
-                `</table>`,
-              logContext: "sms_failure_fallback",
-            }).catch((mailErr) =>
-              console.error("Failed to send SMS-failure fallback email:", mailErr.message)
-            );
-          }
-        });
+        // Student is immediately active; prepare SMS composer payload for the client.
+        const preparedSms = await sendParentCredentialsSms(parentPhone, credentialPayload);
+        parentCredentialSms = {
+          phone: preparedSms.phone || parentPhone,
+          message: preparedSms.message || smsMessage,
+          username: parentUserUsername,
+          password: plainPassword,
+          delivery: "client_sms_composer",
+        };
       }
     }
 
@@ -282,6 +260,7 @@ exports.addStudentToClass = async (req, res) => {
         email: parentUser.email,
         phone: parentUser.phone,
       },
+      parentCredentialSms,
     });
   } catch (error) {
     console.error("addStudentToClass error:", error);
@@ -1391,5 +1370,3 @@ exports.deleteStudent = async (req, res) => {
     res.status(500).json({ message: "Error removing student" });
   }
 };
-
-
