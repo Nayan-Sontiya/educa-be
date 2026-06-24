@@ -7,11 +7,19 @@ const sectionSchema = new mongoose.Schema(
       ref: "School",
       required: true,
     },
-    name: { type: String, required: true }, // A, B, C
+    name: {
+      type: String,
+      required: true,
+      trim: true,
+    },
   },
   { timestamps: true }
 );
 
-sectionSchema.index({ classId: 1, name: 1 }, { unique: true });
+// Unique within a school only
+sectionSchema.index(
+  { schoolId: 1, name: 1 },
+  { unique: true }
+);
 
 module.exports = mongoose.model("Section", sectionSchema);
