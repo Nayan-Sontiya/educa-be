@@ -21,6 +21,7 @@ const {
   getAIAnalysis,
   getMyChildren,
   getPendingStudentsForSchoolAdmin,
+  getStudentByActivationToken,
 } = require("../controllers/studentController");
 
 // Multer: memory storage for Cloudinary upload (max 5 files, 10 MB each)
@@ -35,6 +36,9 @@ const upload = multer({
     }
   },
 });
+
+// ─── Student Activation (Public) ──────────────────────────────────────────────
+router.get("/activate/:token", getStudentByActivationToken);
 
 // ─── Username suggestions ──────────────────────────────────────────────────────
 router.post("/suggest-username", protect, roleCheck(["teacher", "school_admin"]), suggestUsernames);

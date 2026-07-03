@@ -1,10 +1,9 @@
 /**
  * Parent credential sharing.
  *
- * Firebase Phone Auth sends OTP messages from the client SDK only; Firebase Admin
- * cannot send arbitrary SMS text such as login credentials. Server-side SMS
- * delivery has been removed, so callers receive a payload that the mobile client
- * can pass to the device SMS composer.
+ * Firebase Phone Auth sends OTP SMS from the client SDK; Firebase Admin cannot send
+ * arbitrary SMS text such as login credentials. The client sends Firebase OTP to the
+ * parent phone, then shares login credentials via copy/WhatsApp in-app.
  */
 
 function normalize10(phone) {
@@ -33,14 +32,14 @@ async function sendParentCredentialsSms(
     password,
   });
 
-  console.info("[sms] Parent credential SMS prepared for client composer", {
+  console.info("[sms] Parent credential SMS prepared for Firebase phone auth", {
     mobile: `******${mobile.slice(-4)}`,
   });
 
   return {
     ok: false,
     skipped: true,
-    reason: "client_sms_composer_required",
+    reason: "firebase_phone_auth_required",
     phone: mobile,
     message,
   };

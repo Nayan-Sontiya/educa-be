@@ -62,6 +62,8 @@ app.use("/api/subscription", require("./routes/subscriptionRoutes"));
 app.use("/api/blogs", require("./routes/blogRoutes"));
 app.use("/api/platform-news", require("./routes/platformNewsRoutes"));
 app.use("/api/contacts", require("./routes/contactRoutes"));
+app.use("/api/test/whatsapp", require("./routes/whatsAppTestRoutes"));
+
 
 // Cron jobs
 require("./cron/markTeachersAbsent");

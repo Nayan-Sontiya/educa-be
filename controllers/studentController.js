@@ -1,5 +1,6 @@
 // controllers/studentController.js
 const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
 const User = require("../models/User");
 const Student = require("../models/Student");
 const StudentIdentity = require("../models/StudentIdentity");
@@ -8,6 +9,7 @@ const Teacher = require("../models/Teacher");
 const TeacherAssignment = require("../models/TeacherAssignment");
 const StudentPortfolio = require("../models/StudentPortfolio");
 const School = require("../models/School");
+const whatsAppService = require("../services/whatsAppService");
 const { sendParentCredentialsSms } = require("../utils/smsService");
 const {
   buildParentLoginSmsMessage,
@@ -106,7 +108,27 @@ exports.addStudentToClass = async (req, res) => {
     let parentCredentialSms = null;
 
     const parentUserUsername = normalizeUsername(parentUsername);
+    const parentPhoneDigits = String(parentPhone || "").replace(/\D/g, "");
+    const maskedParentPhone = parentPhoneDigits
+      ? `******${parentPhoneDigits.slice(-4)}`
+      : null;
+
+    console.info("[students:add] request received", {
+      actorId: req.user?.id,
+      actorRole: req.user?.role,
+      classSectionId,
+      studentName,
+      parentPhone: maskedParentPhone,
+      parentUsername: parentUserUsername,
+    });
+
     if (!classSectionId || !studentName || !parentPassword || !parentUserUsername) {
+      console.warn("[students:add] missing required fields", {
+        classSectionId: Boolean(classSectionId),
+        studentName: Boolean(studentName),
+        parentPassword: Boolean(parentPassword),
+        parentUsername: Boolean(parentUserUsername),
+      });
       return res.status(400).json({
         message:
           "classSectionId, studentName, parentUsername and parentPassword are required",
@@ -119,6 +141,7 @@ exports.addStudentToClass = async (req, res) => {
       .populate("schoolId", "name email");
 
     if (!classSection) {
+      console.warn("[students:add] class section not found", { classSectionId });
       return res.status(404).json({ message: "Class section not found" });
     }
 
@@ -151,6 +174,11 @@ exports.addStudentToClass = async (req, res) => {
     }
 
     if (!parentPhone) {
+      console.warn("[students:add] missing parent phone", {
+        classSectionId,
+        studentName,
+        parentUsername: parentUserUsername,
+      });
       return res.status(400).json({
         message: "parentPhone is required to create a new parent account.",
       });
@@ -184,6 +212,25 @@ exports.addStudentToClass = async (req, res) => {
       seatBillingStatus = "pending_purchase";
     }
 
+    console.info("[students:add] enrollment status resolved", {
+      schoolId: String(schoolIdForBilling || ""),
+      subscriptionActive,
+      studentStatus,
+      seatBillingStatus,
+    });
+
+    const activationToken = crypto.randomBytes(32).toString("hex");
+    const activationTokenExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+    console.info("[students:add] Activation token generated", {
+      studentName,
+      expiresAt: activationTokenExpiresAt,
+    });
+
+    const schoolName = classSection.schoolId?.name || "Your School";
+    const cls = classSection.classId?.name || "";
+    const sec = classSection.sectionId?.name ? ` - ${classSection.sectionId.name}` : "";
+    const classSectionLabel = cls ? `${cls}${sec}` : "";
+
     const student = await Student.create({
       name: studentName,
       studentIdentityId,
@@ -195,6 +242,20 @@ exports.addStudentToClass = async (req, res) => {
       parentUserId: parentUser._id,
       status: studentStatus,
       seatBillingStatus,
+      activationToken,
+      activationTokenExpiresAt,
+      pendingCredentialsSms: {
+        phone: parentPhone || null,
+        schoolName,
+        studentName,
+        classSectionLabel,
+        username: parentUserUsername,
+        password: plainPassword,
+      }
+    });
+
+    console.info("[students:add] Student created", {
+      studentId: student._id,
     });
 
     // Create an identity-linked portfolio document for this new profile
@@ -202,6 +263,33 @@ exports.addStudentToClass = async (req, res) => {
       studentId: student._id,
       studentIdentityId,
     });
+
+    // Send WhatsApp template message asynchronously to parent's phone number
+    if (parentPhone) {
+      whatsAppService.sendStudentActivationMessage(parentPhone, studentName, activationToken, "en")
+        .then((result) => {
+          if (result.ok) {
+            console.info("[students:add] WhatsApp message sent", {
+              studentId: student._id,
+              parentPhone,
+            });
+          } else {
+            console.error("[students:add] WhatsApp send failure", {
+              studentId: student._id,
+              parentPhone,
+              error: result.error,
+            });
+          }
+        })
+        .catch((err) => {
+          console.error("[students:add] WhatsApp send failure", {
+            studentId: student._id,
+            parentPhone,
+            error: err.message || err,
+          });
+        });
+    }
+
 
     if (parentPhone) {
       const schoolName = classSection.schoolId?.name || "Your School";
@@ -219,20 +307,11 @@ exports.addStudentToClass = async (req, res) => {
       const smsMessage = buildParentLoginSmsMessage(credentialPayload);
 
       if (studentStatus === "pending") {
-        // Credentials are held until the school pays and activates this student.
-        await Student.updateOne(
-          { _id: student._id },
-          {
-            $set: {
-              "pendingCredentialsSms.phone": parentPhone,
-              "pendingCredentialsSms.schoolName": schoolName,
-              "pendingCredentialsSms.studentName": studentName,
-              "pendingCredentialsSms.classSectionLabel": classSectionLabel,
-              "pendingCredentialsSms.username": parentUserUsername,
-              "pendingCredentialsSms.password": plainPassword,
-            },
-          },
-        );
+        console.info("[students:add] parent credential SMS deferred", {
+          studentId: String(student._id),
+          parentPhone: maskedParentPhone,
+          reason: "pending_purchase",
+        });
       } else {
         // Student is immediately active; prepare SMS composer payload for the client.
         const preparedSms = await sendParentCredentialsSms(parentPhone, credentialPayload);
@@ -241,12 +320,27 @@ exports.addStudentToClass = async (req, res) => {
           message: preparedSms.message || smsMessage,
           username: parentUserUsername,
           password: plainPassword,
-          delivery: "client_sms_composer",
+          delivery: "firebase_phone_auth",
         };
+        console.info("[students:add] parent credential SMS payload prepared", {
+          studentId: String(student._id),
+          parentPhone: maskedParentPhone,
+          delivery: parentCredentialSms.delivery,
+          messageLength: parentCredentialSms.message.length,
+          username: parentUserUsername,
+        });
       }
     }
 
     const createdMsg = "Student account created successfully";
+
+    console.info("[students:add] response ready", {
+      studentId: String(student._id),
+      studentStatus,
+      seatBillingStatus,
+      hasParentCredentialSms: Boolean(parentCredentialSms),
+      parentPhone: maskedParentPhone,
+    });
 
     res.status(201).json({
       message: createdMsg,
@@ -1370,3 +1464,47 @@ exports.deleteStudent = async (req, res) => {
     res.status(500).json({ message: "Error removing student" });
   }
 };
+
+// Validate student activation token and return credential details
+exports.getStudentByActivationToken = async (req, res) => {
+  try {
+    const { token } = req.params;
+
+    if (!token) {
+      return res.status(400).json({
+        message: "Activation token is required."
+      });
+    }
+
+    const student = await Student.findOne({ activationToken: token });
+
+    if (!student) {
+      return res.status(404).json({
+        message: "Invalid activation link or token has already been used."
+      });
+    }
+
+    // Check expiration
+    if (student.activationTokenExpiresAt && new Date() > new Date(student.activationTokenExpiresAt)) {
+      return res.status(410).json({
+        message: "This activation link has expired."
+      });
+    }
+
+    // Prepare response details safely (no internal Mongoose IDs or private fields)
+    const username = student.pendingCredentialsSms?.username || "";
+    const password = student.pendingCredentialsSms?.password || "";
+
+    return res.status(200).json({
+      studentName: student.name,
+      username: username,
+      temporaryPassword: password
+    });
+  } catch (error) {
+    console.error("getStudentByActivationToken error:", error);
+    return res.status(500).json({
+      message: "An error occurred while validating the activation link."
+    });
+  }
+};
+

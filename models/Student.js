@@ -70,6 +70,15 @@ const studentSchema = new mongoose.Schema(
       /** @deprecated legacy plain-text credential message */
       message: { type: String, default: null },
     },
+    activationToken: {
+      type: String,
+      default: null,
+      index: true,
+    },
+    activationTokenExpiresAt: {
+      type: Date,
+      default: null,
+    },
   },
   { timestamps: true }
 );
