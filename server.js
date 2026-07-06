@@ -69,7 +69,7 @@ app.use("/api/test/whatsapp", require("./routes/whatsAppTestRoutes"));
 require("./cron/markTeachersAbsent");
 require("./cron/subscriptionJobs");
 
-app.get("/", (req, res) => res.send("EduVerse API is running 🚀"));
+app.get("/", (req, res) => res.send("EduVerse API is running test🚀"));
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🌍 Server running on port ${PORT}`));
