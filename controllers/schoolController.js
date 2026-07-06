@@ -967,15 +967,20 @@ exports.updateSchoolGallery = async (req, res) => {
       school.listing.gallery = [];
     }
 
-    // Add new images (max 10 total)
-    const newImages = galleryFiles.map((file) => getRelativePath(file.path));
-    const totalImages = school.listing.gallery.length + newImages.length;
+    const totalImages = school.listing.gallery.length + galleryFiles.length;
 
     if (totalImages > 10) {
       return res.status(400).json({
         success: false,
         message: "Maximum 10 images allowed in gallery",
       });
+    }
+
+    const { uploadBuffer } = require("../utils/cloudinary");
+    const newImages = [];
+    for (const file of galleryFiles) {
+      const uploadResult = await uploadBuffer(file.buffer, { folder: "educa/gallery" });
+      newImages.push(uploadResult.secure_url);
     }
 
     school.listing.gallery = [...school.listing.gallery, ...newImages];
@@ -1027,6 +1032,18 @@ exports.removeGalleryImage = async (req, res) => {
     );
 
     await school.save();
+
+    // Delete from Cloudinary if applicable
+    const { deleteFile, extractPublicIdFromUrl } = require("../utils/cloudinary");
+    const publicId = extractPublicIdFromUrl(imagePath);
+    if (publicId) {
+      try {
+        await deleteFile(publicId);
+        console.info("[gallery:remove] Deleted image from Cloudinary:", publicId);
+      } catch (err) {
+        console.error("[gallery:remove] Failed to delete from Cloudinary:", err.message || err);
+      }
+    }
 
     const galleryUrls = getFileUrls(school.listing.gallery, req);
 

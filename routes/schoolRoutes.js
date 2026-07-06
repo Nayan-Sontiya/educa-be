@@ -125,6 +125,12 @@ router.post(
 // School admin: update paid leave count
 router.put("/paid-leave-count", protect, adminAuth(), updatePaidLeaveCount);
 
+const memoryUpload = multer({
+  storage: multer.memoryStorage(),
+  fileFilter: galleryFileFilter,
+  limits: { fileSize: 5 * 1024 * 1024 },
+});
+
 // School admin: manage school listing
 router.get("/listing", protect, adminAuth(), getSchoolListing);
 router.put("/listing", protect, adminAuth(), updateSchoolListing);
@@ -132,7 +138,7 @@ router.post(
   "/listing/gallery",
   protect,
   adminAuth(),
-  upload.array("gallery", 10),
+  memoryUpload.array("gallery", 10),
   updateSchoolGallery
 );
 router.delete("/listing/gallery", protect, adminAuth(), removeGalleryImage);
