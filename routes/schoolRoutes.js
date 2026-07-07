@@ -62,15 +62,31 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 },
 });
 
+const handleUploadError = (middleware) => {
+  return (req, res, next) => {
+    middleware(req, res, (err) => {
+      if (err) {
+        return res.status(400).json({
+          success: false,
+          message: err.message || "File upload failed",
+        });
+      }
+      next();
+    });
+  };
+};
+
 // Public registration endpoint (handles file uploads)
 router.post(
   "/register",
-  upload.fields([
-    { name: "registrationCertificate", maxCount: 1 },
-    { name: "affiliationCertificate", maxCount: 1 },
-    { name: "principalIdProof", maxCount: 1 },
-    { name: "gallery", maxCount: 10 }, // Gallery images (max 10)
-  ]),
+  handleUploadError(
+    upload.fields([
+      { name: "registrationCertificate", maxCount: 1 },
+      { name: "affiliationCertificate", maxCount: 1 },
+      { name: "principalIdProof", maxCount: 1 },
+      { name: "gallery", maxCount: 10 }, // Gallery images (max 10)
+    ])
+  ),
   registerSchool
 );
 
@@ -138,7 +154,7 @@ router.post(
   "/listing/gallery",
   protect,
   adminAuth(),
-  memoryUpload.array("gallery", 10),
+  handleUploadError(memoryUpload.array("gallery", 10)),
   updateSchoolGallery
 );
 router.delete("/listing/gallery", protect, adminAuth(), removeGalleryImage);
