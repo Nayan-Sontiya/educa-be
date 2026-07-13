@@ -364,14 +364,7 @@ exports.addStudentToClass = async (req, res) => {
       const keyPattern = error.keyPattern || {};
       const keyValue = error.keyValue || {};
       
-      // Handle roll number duplicate
-      if (keyPattern.rollNumber && keyPattern.classSectionId) {
-        const rollNum = req.body.rollNumber || keyValue.rollNumber || 'provided';
-        return res.status(409).json({
-          message: `Roll number "${rollNum}" already exists in this class section. Please use a different roll number.`,
-        });
-      }
-      
+
       // Handle email duplicate (for null email case - should not happen with proper sparse index)
       if (keyPattern.email && (keyValue.email === null || keyValue.email === undefined)) {
         return res.status(409).json({

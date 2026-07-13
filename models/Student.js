@@ -83,10 +83,9 @@ const studentSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Prevent duplicate roll numbers within the same class section
+// Index roll numbers within the same class section
 studentSchema.index(
-  { classSectionId: 1, rollNumber: 1 },
-  { unique: true, sparse: true }
+  { classSectionId: 1, rollNumber: 1 }
 );
 studentSchema.index({ parentUserId: 1, status: 1 });
 
