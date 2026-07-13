@@ -35,6 +35,7 @@ const {
   mapRazorpaySubscriptionStatus,
   periodBoundsFromRazorpaySubscription,
   envPlanId,
+  syncRazorpayPlansByCadence,
 } = require("../utils/razorpayService");
 
 async function getBillingSettingsDoc() {
@@ -219,7 +220,12 @@ exports.createCheckoutSession = async (req, res) => {
       });
     }
 
-    const unitPaise = planAmountPaise(plan, 1, billing.pricePerStudentYearInr);
+    const synced = await syncRazorpayPlansByCadence();
+    const razorpayPlan = synced.get(plan) || null;
+    const unitPaise =
+      razorpayPlan?.item?.amount != null
+        ? Number(razorpayPlan.item.amount)
+        : planAmountPaise(plan, 1, billing.pricePerStudentYearInr);
     if (unitPaise * includedSeats < 100) {
       return res.status(400).json({ message: "Total subscription amount too small" });
     }
@@ -376,18 +382,25 @@ exports.getSubscriptionStatus = async (req, res) => {
 
     const plan = sub?.plan || null;
     const statusOut = sub?.status ?? null;
+    const synced = await syncRazorpayPlansByCadence();
+    const getPlanUnitPaise = (pKey) => {
+      const rp = synced.get(pKey);
+      return rp?.item?.amount != null
+        ? Number(rp.item.amount)
+        : planAmountPaise(pKey, 1, billing.pricePerStudentYearInr);
+    };
+
     const amountPaise =
       plan && ["monthly", "quarterly", "yearly"].includes(plan)
-        ? planAmountPaise(plan, includedSeatCount, billing.pricePerStudentYearInr)
+        ? getPlanUnitPaise(plan) * includedSeatCount
         : null;
 
     const amountsInr =
       includedSeatCount >= 1
         ? {
-            monthly: planAmountPaise("monthly", includedSeatCount, billing.pricePerStudentYearInr) / 100,
-            quarterly:
-              planAmountPaise("quarterly", includedSeatCount, billing.pricePerStudentYearInr) / 100,
-            yearly: planAmountPaise("yearly", includedSeatCount, billing.pricePerStudentYearInr) / 100,
+            monthly: (getPlanUnitPaise("monthly") * includedSeatCount) / 100,
+            quarterly: (getPlanUnitPaise("quarterly") * includedSeatCount) / 100,
+            yearly: (getPlanUnitPaise("yearly") * includedSeatCount) / 100,
           }
         : null;
 

@@ -113,7 +113,7 @@ function subscriptionTotalCount(plan, startAtSec = Math.floor(Date.now() / 1000)
   if (requested > capped) {
     console.warn(
       `[razorpay] RAZORPAY_SUBSCRIPTION_TOTAL_COUNT=${requested} too high for plan "${plan}" ` +
-        `(max ${capped} before end_at cap) — using ${capped}`,
+      `(max ${capped} before end_at cap) — using ${capped}`,
     );
   }
   return Math.min(requested, capped);
@@ -262,7 +262,7 @@ async function fetchAllRazorpayPlansFromApi() {
   let skip = 0;
   const pageSize = 100;
 
-  for (;;) {
+  for (; ;) {
     const page = await rzp.plans.all({ count: pageSize, skip });
     const items = page?.items || [];
     all.push(...items);
@@ -376,7 +376,7 @@ async function resolvePlanId(plan, pricePerStudentYearInr) {
   const created = await createRazorpayPlan(plan, pricePerStudentYearInr);
   console.warn(
     `[razorpay] No dashboard plan matched "${plan}" — created ${created.id}. ` +
-      `Add notes.plan="${plan}" on your Razorpay plan, or set RAZORPAY_PLAN_${plan.toUpperCase()}_ID=${created.id}.`
+    `Add notes.plan="${plan}" on your Razorpay plan, or set RAZORPAY_PLAN_${plan.toUpperCase()}_ID=${created.id}.`
   );
   synced.set(plan, created);
   _planSyncCache = { at: Date.now(), byPlan: synced };
@@ -498,7 +498,7 @@ async function findRazorpayCustomerByEmail(email) {
   const target = email.trim().toLowerCase();
   let skip = 0;
 
-  for (;;) {
+  for (; ;) {
     const page = await rzp.customers.all({ count: 100, skip });
     const items = page?.items || [];
     const hit = items.find((c) => String(c.email || "").trim().toLowerCase() === target);
@@ -594,7 +594,7 @@ async function createSchoolSubscription({
 
     console.warn(
       `[razorpay] subscription ${subscription?.id} end_at=${rzEndAt} out of bounds ` +
-        `(total_count=${totalCount}, plan=${plan}) — retrying`,
+      `(total_count=${totalCount}, plan=${plan}) — retrying`,
     );
     try {
       await rzp.subscriptions.cancel(subscription.id, false);
