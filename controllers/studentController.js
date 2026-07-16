@@ -265,7 +265,7 @@ exports.addStudentToClass = async (req, res) => {
     });
 
     // Send WhatsApp template message asynchronously to parent's phone number
-    if (parentPhone) {
+    if (parentPhone && studentStatus !== "pending") {
       whatsAppService.sendStudentActivationMessage(parentPhone, studentName, activationToken, "en")
         .then((result) => {
           if (result.ok) {

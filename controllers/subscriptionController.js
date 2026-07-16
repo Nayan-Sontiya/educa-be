@@ -782,6 +782,7 @@ async function handlePendingStudentsPaymentCaptured(payment) {
     {
       _id: 1,
       name: 1,
+      activationToken: 1,
       "pendingCredentialsSms.phone": 1,
       "pendingCredentialsSms.schoolName": 1,
       "pendingCredentialsSms.studentName": 1,
@@ -803,6 +804,8 @@ async function handlePendingStudentsPaymentCaptured(payment) {
   if (result.modifiedCount === 0) return;
 
   const credentialLines = [];
+  const whatsAppService = require("../services/whatsAppService");
+
   for (const s of pendingStudents) {
     const pending = s.pendingCredentialsSms || {};
     const phone = pending.phone;
@@ -825,6 +828,32 @@ async function handlePendingStudentsPaymentCaptured(payment) {
       console.warn(
         `[sms] Student ${s._id} has legacy pendingCredentialsSms.message only; share credentials manually.`,
       );
+    }
+
+    if (phone && s.activationToken) {
+      const studentName = s.name || pending.studentName || "Student";
+      whatsAppService.sendStudentActivationMessage(phone, studentName, s.activationToken, "en")
+        .then((waResult) => {
+          if (waResult.ok) {
+            console.info("[subscription:activation] WhatsApp message sent", {
+              studentId: s._id,
+              phone,
+            });
+          } else {
+            console.error("[subscription:activation] WhatsApp send failure", {
+              studentId: s._id,
+              phone,
+              error: waResult.error,
+            });
+          }
+        })
+        .catch((err) => {
+          console.error("[subscription:activation] WhatsApp send failure", {
+            studentId: s._id,
+            phone,
+            error: err.message || err,
+          });
+        });
     }
   }
 
