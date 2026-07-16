@@ -777,7 +777,7 @@ exports.getStudentsForClassSection = async (req, res) => {
         .json({ message: "classSectionId query parameter is required" });
     }
 
-    const students = await Student.find({ classSectionId, status: "active" })
+    const students = await Student.find({ classSectionId, status: { $in: ["active", "pending"] } })
       .populate("parentUserId", "name username")
       .select("name rollNumber classSectionId parentUserId seatBillingStatus")
       .sort({ createdAt: 1 });
@@ -818,7 +818,7 @@ exports.getStudentsForTeacher = async (req, res) => {
     }
     const filter = {
       classSectionId: { $in: classSectionIds },
-      status: "active",
+      status: { $in: ["active", "pending"] },
     };
     const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
     if (search) {
