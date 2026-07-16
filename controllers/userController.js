@@ -168,6 +168,19 @@ exports.updateCurrentUser = async (req, res) => {
               "Email change requires OTP verification. Request and verify OTP first.",
           });
         }
+
+        if (current.role === "school_admin" && current.schoolId) {
+          const School = require("../models/School");
+          const schoolEmailCheck = await School.findOne({
+            email: nextEmail,
+            _id: { $ne: current.schoolId },
+          });
+          if (schoolEmailCheck) {
+            return res.status(400).json({
+              message: "This email is already registered to another school.",
+            });
+          }
+        }
       }
       updateData.email = nextEmail || undefined;
     }
@@ -188,6 +201,8 @@ exports.updateCurrentUser = async (req, res) => {
       user.pendingContactChange = undefined;
       await user.save();
     }
+
+    await syncSchoolAndRazorpayContact(user);
 
     res.json({ message: "Profile updated successfully", user });
   } catch (error) {
@@ -578,6 +593,20 @@ exports.adminPatchUser = async (req, res) => {
           message: emailCheck.message,
         });
       }
+
+      if (target.role === "school_admin" && target.schoolId) {
+        const School = require("../models/School");
+        const schoolEmailCheck = await School.findOne({
+          email: patch.email,
+          _id: { $ne: target.schoolId },
+        });
+        if (schoolEmailCheck) {
+          return res.status(400).json({
+            success: false,
+            message: "This email is already registered to another school.",
+          });
+        }
+      }
     }
     if (patch.username) {
       const taken = await User.findOne({
@@ -599,6 +628,8 @@ exports.adminPatchUser = async (req, res) => {
     const fresh = await User.findById(target._id)
       .select("-password")
       .populate("schoolId", "name verificationStatus");
+
+    await syncSchoolAndRazorpayContact(fresh);
 
     res.status(200).json({
       success: true,
@@ -691,3 +722,52 @@ exports.adminResetPassword = async (req, res) => {
     res.status(500).json({ success: false, message: "Error resetting password" });
   }
 };
+
+async function syncSchoolAndRazorpayContact(user) {
+  try {
+    if (user.role !== "school_admin" || !user.schoolId) return;
+
+    const schoolId = user.schoolId && typeof user.schoolId === "object" ? user.schoolId._id : user.schoolId;
+    if (!schoolId) return;
+
+    const School = require("../models/School");
+    const SchoolSubscription = require("../models/SchoolSubscription");
+    const { ensureRazorpayCustomer } = require("../utils/razorpayService");
+    const { normalizeEmail } = require("../utils/emailUniqueness");
+
+    const school = await School.findById(schoolId);
+    if (!school) return;
+
+    let schoolChanged = false;
+
+    if (user.email && normalizeEmail(school.email) !== normalizeEmail(user.email)) {
+      school.email = user.email;
+      if (school.authorizedPerson) {
+        school.authorizedPerson.officialEmail = user.email;
+      }
+      schoolChanged = true;
+    }
+
+    if (user.phone && school.phone !== user.phone) {
+      school.phone = user.phone;
+      if (school.authorizedPerson) {
+        school.authorizedPerson.mobile = user.phone;
+      }
+      schoolChanged = true;
+    }
+
+    if (schoolChanged) {
+      await school.save();
+      console.log(`[userController] Updated School ${school._id} contact details to match school_admin`);
+
+      // Update Razorpay Customer if exists
+      const subDoc = await SchoolSubscription.findOne({ schoolId: school._id });
+      if (subDoc && subDoc.razorpayCustomerId) {
+        await ensureRazorpayCustomer(subDoc, school);
+        console.log(`[userController] Updated Razorpay customer details for school: ${school._id}`);
+      }
+    }
+  } catch (err) {
+    console.error("[userController] syncSchoolAndRazorpayContact failed:", err.message);
+  }
+}
