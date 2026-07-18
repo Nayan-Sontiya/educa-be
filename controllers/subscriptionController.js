@@ -747,6 +747,13 @@ async function handlePaymentFailed(payload) {
     rzpSub?.notes?.schoolId || payment?.notes?.schoolId || payment?.notes?.school_id;
   if (!schoolId) return;
 
+  // A failed payment for pending student activation should NOT disable the school's main subscription
+  const type = payment?.notes?.type || rzpSub?.notes?.type;
+  if (type === "pending_students") {
+    console.info(`[webhook] payment.failed ignored for school ${schoolId} (pending_students activation failed).`);
+    return;
+  }
+
   const subDoc = await SchoolSubscription.findOne({ schoolId });
   if (!subDoc) return;
 
