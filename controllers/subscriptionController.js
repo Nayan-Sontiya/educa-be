@@ -797,7 +797,6 @@ async function handlePendingStudentsPaymentCaptured(payment) {
     { schoolId, status: "pending" },
     {
       $set: { status: "active", seatBillingStatus: "included" },
-      $unset: { pendingCredentialsSms: "" },
     }
   );
 
