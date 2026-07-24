@@ -30,7 +30,7 @@ const userSchema = new mongoose.Schema(
     username: {
       type: String,
       required: function () {
-        return this.role === "parent" || this.role === "student";
+        return this.role === "parent";
       },
       validate: {
         validator: function (value) {
@@ -53,6 +53,8 @@ const userSchema = new mongoose.Schema(
     },
     dateOfBirth: { type: Date },
     address: { type: String },
+    city: { type: String },
+    state: { type: String },
     pendingContactChange: {
       email: {
         value: String,
@@ -82,12 +84,14 @@ const userSchema = new mongoose.Schema(
     },
     role: {
       type: String,
-      enum: ["admin", "teacher", "counselor", "school_admin", "parent", "student"],
+      enum: ["admin", "teacher", "counselor", "school_admin", "parent", "student", "college_admin"],
       default: "teacher",
     },
     /** Platform super admin can block sign-in and API access */
     isBlocked: { type: Boolean, default: false },
     schoolId: { type: mongoose.Schema.Types.ObjectId, ref: "School" },
+    collegeId: { type: mongoose.Schema.Types.ObjectId, ref: "College" },
+    isOnboarded: { type: Boolean, default: false },
   },
   { timestamps: true }
 );
@@ -96,11 +100,14 @@ const userSchema = new mongoose.Schema(
 // (This is already enforced by required() functions, but adding explicit check)
 userSchema.pre('validate', function (next) {
   // For non-parent/student roles, email is required (enforced by schema)
-  // For parent/student roles, username is required (enforced by schema)
-  // So this validation is mainly for clarity
-  if (this.role === 'parent' || this.role === 'student') {
+  // For parent/student roles, username/email requirements are validated
+  if (this.role === 'parent') {
     if (!this.username || this.username.trim() === '') {
-      return next(new Error('Username is required for parent and student users'));
+      return next(new Error('Username is required for parent users'));
+    }
+  } else if (this.role === 'student') {
+    if (!this.username && !this.email) {
+      return next(new Error('Email or Username is required for student users'));
     }
   }
   next();

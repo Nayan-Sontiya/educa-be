@@ -1,6 +1,7 @@
 // controllers/authController.js
 const User = require("../models/User");
 const School = require("../models/School");
+const College = require("../models/College");
 const { schoolAccessMessage } = require("../utils/schoolAccessMessage");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
@@ -24,6 +25,98 @@ exports.registerUser = async (req, res) => {
   try {
     const { name, email, username, password, role, phone, schoolId } = req.body;
     
+    if (role === "student") {
+      const { dateOfBirth, city, state, emailVerificationToken, phoneVerificationToken } = req.body;
+      
+      // 1. Verify mandatory fields
+      if (!name?.trim() || !email?.trim() || !phone || !password || !dateOfBirth || !city?.trim() || !state?.trim()) {
+        return res.status(400).json({ success: false, message: "Please fill all required fields." });
+      }
+
+      // 2. Validate email format
+      const { assertEmailAvailable, isValidEmailFormat } = require("../utils/emailUniqueness");
+      if (!isValidEmailFormat(email)) {
+        return res.status(400).json({ success: false, message: "Please enter a valid email address." });
+      }
+
+      // 3. Verify email uniqueness
+      const emailCheck = await assertEmailAvailable(email);
+      if (!emailCheck.ok) {
+        if (emailCheck.status === 409) {
+          return res.status(409).json({ success: false, message: "An account already exists with this email address." });
+        }
+        return res.status(emailCheck.status).json({ success: false, message: emailCheck.message });
+      }
+
+      // 4. Validate password strength
+      const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&#])[A-Za-z\d@$!%*?&#]{8,}$/;
+      if (!passwordRegex.test(password)) {
+        return res.status(400).json({
+          success: false,
+          message: "Password must be at least 8 characters long and contain at least one uppercase letter, one lowercase letter, one number, and one special character."
+        });
+      }
+
+      // 5. Validate Date of Birth (cannot be in the future)
+      const dobDate = new Date(dateOfBirth);
+      if (isNaN(dobDate.getTime())) {
+        return res.status(400).json({ success: false, message: "Please enter a valid Date of Birth." });
+      }
+      if (dobDate > new Date()) {
+        return res.status(400).json({ success: false, message: "Date of birth cannot be in the future" });
+      }
+
+      // 6. Assert OTP tokens
+      const { assertEmailVerificationToken } = require("../utils/emailVerificationJwt");
+      const { assertPhoneVerificationToken } = require("./signupOtpController");
+
+      const evCheck = assertEmailVerificationToken(emailVerificationToken, email);
+      if (!evCheck.ok) {
+        return res.status(400).json({ success: false, message: evCheck.message });
+      }
+
+      const pvCheck = assertPhoneVerificationToken(phoneVerificationToken, phone);
+      if (!pvCheck.ok) {
+        return res.status(400).json({ success: false, message: pvCheck.message });
+      }
+
+      // Hash password
+      const hash = await bcrypt.hash(password, 10);
+
+      // Create student user
+      const userData = {
+        name: name.trim(),
+        email: emailCheck.normalizedEmail,
+        password: hash,
+        role: "student",
+        phone: phone,
+        dateOfBirth: dobDate,
+        city: city.trim(),
+        state: state.trim()
+      };
+
+      const pn = normalizePhone(phone);
+      if (pn) userData.phoneNormalized = pn;
+
+      const user = await User.create(userData);
+
+      return res.status(201).json({
+        success: true,
+        message: "Student registered successfully.",
+        user: {
+          id: user._id.toString(),
+          name: user.name,
+          email: user.email,
+          phone: user.phone,
+          role: user.role,
+          dateOfBirth: user.dateOfBirth,
+          city: user.city,
+          state: user.state,
+          createdAt: user.createdAt
+        }
+      });
+    }
+
     // Validation
     if (!name || !password || !role) {
       return res.status(400).json({ message: "Missing required fields" });
@@ -108,6 +201,7 @@ exports.registerUser = async (req, res) => {
       createdAt: user.createdAt,
       role: user.role,
       isBlocked: user.isBlocked === true,
+      isOnboarded: user.isOnboarded === true,
     };
 
     res.status(201).json({ 
@@ -216,6 +310,28 @@ exports.loginUser = async (req, res) => {
       }
     }
 
+    if (user.role === "college_admin") {
+      const college = user.collegeId
+        ? await College.findById(user.collegeId).select("verificationStatus rejectionReason name")
+        : await College.findOne({ createdBy: user._id }).select("verificationStatus rejectionReason name");
+
+      if (!college) {
+        return res.status(403).json({ message: "College profile not found for this account" });
+      }
+
+      if (college.verificationStatus !== "Verified") {
+        let msg = "Your college registration is currently under review. You will be notified once it is approved.";
+        if (college.verificationStatus === "Rejected") {
+          msg = "Your registration has been rejected. Please contact UtthanAI Support for more information.";
+        } else if (college.verificationStatus === "Suspended") {
+          msg = "Your college account has been suspended. Please contact UtthanAI Support.";
+        } else if (college.verificationStatus === "Blocked") {
+          msg = "Your college account has been blocked. Please contact UtthanAI Support.";
+        }
+        return res.status(403).json({ success: false, message: msg });
+      }
+    }
+
     if (user.role !== "admin") {
       const schoolId = await resolveSchoolIdForUser(user);
       if (
@@ -259,6 +375,7 @@ exports.loginUser = async (req, res) => {
       createdAt: user.createdAt,
       role: user.role,
       isBlocked: user.isBlocked === true,
+      isOnboarded: user.isOnboarded === true,
     };
     if (user.role === "teacher") {
       userResponse.teacherStatus = "active";

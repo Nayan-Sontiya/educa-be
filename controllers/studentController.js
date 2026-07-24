@@ -593,6 +593,13 @@ exports.linkExistingStudentToClass = async (req, res) => {
       seatBillingStatus,
     });
 
+    // Sync parent user's schoolId to the new school
+    if (identity.parentUserId) {
+      await User.findByIdAndUpdate(identity.parentUserId, {
+        schoolId: classSection.schoolId,
+      });
+    }
+
     // Ensure portfolio is identity-linked and backfill old entries' schoolId if missing
     let portfolio =
       (await StudentPortfolio.findOne({ studentIdentityId: identity._id })) ||

@@ -98,6 +98,13 @@ try {
 
 ---
 
+## 🔄 Reusing Existing Code & Patterns
+
+1. **Scan Before Writing**: Proactively search the workspace for existing utility helpers, models, controllers, and services. Never rewrite functionality or utility logic that already exists in the backend codebase.
+2. **Import/Extend**: Re-use existing patterns from folders like `models/`, `services/`, and `utils/` (e.g. extending existing OTP helpers, JWT handlers, or phone/username normalization logic).
+
+---
+
 ## 🚫 FORBIDDEN Practices
 
 - ❌ **No direct DB manipulations inside routes**: Always isolate database calls within controllers, model hooks, or seeding/cleanup scripts.

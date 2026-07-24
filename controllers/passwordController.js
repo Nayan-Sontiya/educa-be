@@ -36,8 +36,10 @@ function validatePasswordStrength(pw) {
   if (!pw || typeof pw !== "string")
     return "Password is required";
   if (pw.length < 8) return "Password must be at least 8 characters";
-  if (!/[A-Z]/.test(pw)) return "Password must include an uppercase letter";
-  if (!/[0-9]/.test(pw)) return "Password must include a number";
+  if (!/[A-Z]/.test(pw)) return "Password must include at least one uppercase letter";
+  if (!/[a-z]/.test(pw)) return "Password must include at least one lowercase letter";
+  if (!/[0-9]/.test(pw)) return "Password must include at least one number";
+  if (!/[@$!%*?&#]/.test(pw)) return "Password must include at least one special character";
   return null;
 }
 
@@ -102,7 +104,12 @@ exports.forgotPasswordSendOtp = async (req, res) => {
       return res.status(400).json({ message: "Please enter a valid email or username" });
     }
 
-    const { user, via } = await resolveUserFromIdentifier(identifier);
+    let { user, via } = await resolveUserFromIdentifier(identifier);
+
+    // For students, even if identifier is email, force SMS flow to reset via registered mobile number
+    if (user && user.role === "student") {
+      via = "sms";
+    }
 
     // For email flow, user must have an email. For SMS flow, user must have a phone.
     const pn = user ? normalizePhone(user.phone) : "";
